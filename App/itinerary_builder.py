@@ -1,42 +1,48 @@
+import os
 import json
-from typing import Dict, Any
+from typing import Dict, Any, List
+from groq import Groq
+from dotenv import load_dotenv
 
-from main import client
+load_dotenv()
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 
-def generate_itinerary(city: str, days: int, sightseeing_list: list) -> Dict[str, Any]:
+def generate_itinerary(
+        city: str,
+        days: int,
+        sightseeing_list: List[Dict[str, str]],
+        cost_per_day_total: float = 0,
+        cost_per_day_hotel: float = 0,
+        cost_per_day_car: float = 0
+) -> Dict[str, Any]:
     """
-    Generates a structured day-wise itinerary using sightseeing places.
+    Generates a structured day-wise itinerary using sightseeing places
+    and applies daily cost labels.
     """
 
-    # Convert sightseeing list into bullet-ready text
-    sightseeing_strings = ", ".join(
-        [item["place"] for item in sightseeing_list]
-    )
+    # format sightseeing places for AI prompt
+    sightseeing_names = ", ".join(item["place"] for item in sightseeing_list)
 
     prompt = f"""
-You are a travel planner creating a day-by-day itinerary for a travel quotation.
-The sightseeing locations that MUST be used in the itinerary are:
-
-{sightseeing_strings}
+You are a travel planner writing a day-by-day itinerary.
+Use ONLY the following sightseeing places: {sightseeing_names}.
+Spread them logically across {days} days.
 
 Rules:
-- Use only the above places.
-- Spread places logically across {days} days.
-- Each day must have a clear title.
-- Keep activities short & real.
-- No timings or prices.
-- No invented locations.
-- No markdown.
+- Each day must have a title
+- Use short activity lines
+- No times, no prices, no random places
+- Professional travel tone
+- Output must be strict JSON only
 
-Output format must be STRICT JSON:
-
+Format:
 {{
   "city": "{city}",
   "itinerary": [
     {{
       "day": <number>,
-      "title": "<day_title>",
+      "title": "<title>",
       "activities": [
         "<activity>"
       ]
@@ -54,14 +60,18 @@ Output format must be STRICT JSON:
         )
 
         raw_output = response.choices[0].message.content.strip()
+        itinerary_data = json.loads(raw_output)
 
-        data = json.loads(raw_output)
+        # attach cost to each day
+        for day in itinerary_data["itinerary"]:
+            day["day_cost_total"] = round(cost_per_day_total, 2)
+            day["hotel_cost"] = round(cost_per_day_hotel, 2)
+            day["car_cost"] = round(cost_per_day_car, 2)
 
-        return data
+        return itinerary_data
 
     except json.JSONDecodeError:
-        print("⚠️ JSON parsing failed. Returning raw output.")
-        return {"raw_output": raw_output}
+        return {"error": "JSON parsing failed", "raw": raw_output}
+
     except Exception as e:
-        print("⚠️ Groq request failed:", str(e))
         return {"error": str(e)}

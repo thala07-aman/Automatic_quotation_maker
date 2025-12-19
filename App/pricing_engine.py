@@ -1,0 +1,36 @@
+import pandas as pd
+
+def load_pricing_data(uploaded_file):
+    try:
+        xls = pd.ExcelFile(uploaded_file)
+        sheet_names = xls.sheet_names
+
+        if "Hotels" not in sheet_names or "CarRental" not in sheet_names:
+            return None, None
+
+        hotels_df = pd.read_excel(xls, sheet_name="Hotels")
+        car_df = pd.read_excel(xls, sheet_name="CarRental")
+
+        print(pd.ExcelFile(uploaded_file).sheet_names)
+        return hotels_df, car_df
+    except Exception as e:
+        return None, None
+
+
+def get_hotel_price(hotels_df, city, star):
+    df = hotels_df[
+        (hotels_df["City"].str.lower() == city.lower()) &
+        (hotels_df["Star"] == star)
+    ]
+    if df.empty:
+        return None
+    return df.iloc[0]["Price_Per_Night_Per_Person"], df.iloc[0]["Hotel_Name"]
+
+
+def get_car_price(car_df, city):
+    df = car_df[
+        (car_df["City"].str.lower() == city.lower())
+    ]
+    if df.empty:
+        return None
+    return df.iloc[0]["Price_Per_Day_Per_Car"]
