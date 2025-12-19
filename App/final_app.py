@@ -1,10 +1,8 @@
 import streamlit as st
-import pandas as pd
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4
 import io
-
 
 from main import generate_sightseeing
 from itinerary_builder import generate_itinerary
@@ -129,8 +127,8 @@ def main():
             "total_cost": total_cost
         }
 
-        st.subheader("📦 Travel Plan JSON")
-        st.json(travel_plan)
+        # st.subheader("📦 Travel Plan JSON")
+        # st.json(travel_plan)
 
         # ===============================
         # PDF GENERATION (REPORTLAB)
