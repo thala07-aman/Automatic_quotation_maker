@@ -9,7 +9,7 @@ load_dotenv()
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 
-def generate_sightseeing(city: str, days: int = 3, max_places: int = 6) -> Dict[str, Any]:
+def generate_sightseeing(note: str ,city: str, days: int = 3, max_places: int = 6, ) -> Dict[str, Any]:
     """
     Generates sightseeing suggestions for a travel quotation.
     Returns structured JSON data.
@@ -23,7 +23,7 @@ Avoid dramatic or promotional language.
 Short sentences only.
 
 Task:
-Generate a sightseeing list for a client visiting {city} for {days} days.
+Generate a sightseeing list for a client visiting {city} for {days} days, and also add the places from {note} if any.
 Limit to {max_places} well known places.
 
 Output format (strict JSON, no commentary):

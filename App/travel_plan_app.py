@@ -1,14 +1,55 @@
+import os
+
 import streamlit as st
 import pandas as pd
 import io
 
-from main import generate_sightseeing
+from groq import Groq
+
+from generate_sightseeing import generate_sightseeing
 from itinerary_builder import generate_itinerary
 from pricing_engine import load_pricing_data, get_hotel_price, get_car_price
 
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4
+
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+# ===============================
+# SESSION STATE
+# ===============================
+if "generated" not in st.session_state:
+    st.session_state.generated = False
+
+if "city_data" not in st.session_state:
+    st.session_state.city_data = {}
+
+if "selected_option" not in st.session_state:
+    st.session_state.selected_option = {}
+
+
+
+def explain_hotel_choice(city, hotel_name, star):
+    prompt = f"""
+You are a travel consultant.
+Explain in 2 short professional sentences why {hotel_name}, a {star}-star hotel in {city},
+is a good choice for travelers.
+
+Rules:
+- No pricing
+- No exaggeration
+- No promises
+- Business-professional tone
+"""
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3
+    )
+
+    return response.choices[0].message.content.strip()
 
 
 def main():
@@ -87,24 +128,71 @@ def main():
     # PROCESS BUTTON
     # ------------------------------------------
     if st.button("Generate Multi-City Quotation"):
+        st.session_state.generated = True
+        st.session_state.hotel_options = None
+        st.session_state.sightseeing = None
+        st.session_state.itinerary = None
 
-        total_cost = 0
-        multi_city_pricing = {}
-        all_sightseeing = {}
-        all_itineraries = {}
+    if not st.session_state.generated:
+        return
 
-        # ------------------------------
-        # LOOP PER CITY
-        # ------------------------------
-        for city, days in zip(cities, days_per_city):
+    total_cost = 0
+    multi_city_pricing = {}
+    all_sightseeing = {}
+    all_itineraries = {}
 
+    # ------------------------------
+    # LOOP PER CITY
+    # ------------------------------
+    for city, days in zip(cities, days_per_city):
+
+        if city not in st.session_state.city_data:
             # --- pricing ---
-            hotel_price_result = get_hotel_price(hotels_df, city, star)
-            if hotel_price_result is None:
-                st.error(f"❌ No hotel pricing found for {city} ({star}-star)")
+            city_hotels = hotels_df[
+                (hotels_df["City"].str.lower() == city.lower()) &
+                (hotels_df["Star"] == star)
+                ].sort_values("Price_Per_Night_Per_Person")
+
+            if city_hotels.empty:
+                st.error(f"❌ No hotels found for {city} ({star}-star)")
                 return
 
-            hotel_price, hotel_name = hotel_price_result
+            hotel_options = city_hotels.head(3).reset_index(drop=True)
+
+            options = []
+            for _, row in hotel_options.iterrows():
+                options.append({
+                    "hotel_name": row["Hotel_Name"],
+                    "price": row["Price_Per_Night_Per_Person"],
+                    "star": row["Star"],
+                    "recommendation": explain_hotel_choice(
+                        city, row["Hotel_Name"], row["Star"]
+                    )
+                })
+
+            st.subheader(f"🏨 Hotel Options — {city}")
+
+            labels = ["Option A (Best Value)", "Option B", "Option C"]
+
+            selected_index = st.radio(
+                f"Choose hotel for {city}",
+                range(len(options)),
+                format_func=lambda i: labels[i],
+                key=f"hotel_option_{city}"
+            )
+            st.session_state.selected_option[city] = selected_index
+            selected_hotel = options[selected_index]
+
+            for i, opt in enumerate(options):
+                st.markdown(f"### {labels[i]}")
+                st.write(f"**{opt['hotel_name']}** ({opt['star']}-Star)")
+                st.write(opt["recommendation"])
+                st.write(f"Price per night per person: ₹{opt['price']:,}")
+                st.markdown("---")
+
+            hotel_name = selected_hotel["hotel_name"]
+            hotel_price = selected_hotel["price"]
+
             car_price = get_car_price(car_df, city)
 
             hotel_cost_total = hotel_price * travelers * days
@@ -129,7 +217,7 @@ def main():
 
             # --- sightseeing ---
             with st.spinner(f"Sightseeing → {city}"):
-                sightseeing_data = generate_sightseeing(city, days, max_places)
+                sightseeing_data = generate_sightseeing(city_notes[city] , city, days, max_places, )
                 sightseeing_list = sightseeing_data.get("sightseeing", [])
                 all_sightseeing[city] = sightseeing_list
 
@@ -146,131 +234,131 @@ def main():
                 itinerary_list = itinerary_data.get("itinerary", [])
                 all_itineraries[city] = itinerary_list
 
-        st.success("Multi-City Quotation Ready!")
+    st.success("Multi-City Quotation Ready!")
 
-        # ------------------------------------------
-        # DISPLAY OUTPUT
-        # ------------------------------------------
-        st.subheader("💰 Pricing Overview")
-        for city in cities:
-            data = multi_city_pricing[city]
-            st.write(f"### {city} — {data['days']} Days")
-            st.write(f"Hotel: {data['hotel_name']} ({star}-Star)")
-            st.write(f"Hotel Total: ₹{data['hotel_cost_total']:,}")
-            st.write(f"Car Total: ₹{data['car_cost_total']:,}")
-            st.write(f"City Total: ₹{data['city_total']:,}")
-            if city_notes[city].strip():
-                st.write("📝 Notes:")
-                st.write(city_notes[city])
-            st.markdown("---")
+    # ------------------------------------------
+    # DISPLAY OUTPUT
+    # ------------------------------------------
+    st.subheader("💰 Pricing Overview")
+    for city in cities:
+        data = multi_city_pricing[city]
+        st.write(f"### {city} — {data['days']} Days")
+        st.write(f"Hotel: {data['hotel_name']} ({star}-Star)")
+        st.write(f"Hotel Total: ₹{data['hotel_cost_total']:,}")
+        st.write(f"Car Total: ₹{data['car_cost_total']:,}")
+        st.write(f"City Total: ₹{data['city_total']:,}")
+        if city_notes[city].strip():
+            st.write("📝 Notes:")
+            st.write(city_notes[city])
+        st.markdown("---")
 
-        st.write(f"## GRAND TOTAL: ₹{total_cost:,}")
+    st.write(f"## GRAND TOTAL: ₹{total_cost:,}")
 
-        st.subheader("🏞️ Sightseeing (City-wise)")
-        for city in cities:
-            st.markdown(f"### {city}")
-            if all_sightseeing[city]:
-                for spot in all_sightseeing[city]:
-                    st.markdown(f"- **{spot['place']}** — {spot['description']}")
-            else:
-                st.write("No sightseeing available.")
-            st.markdown("---")
-
-        st.subheader("📅 Day-by-Day Itinerary (City-wise)")
-
-        day_counter = 1  # running day number across all cities
-
-        for city in cities:
-            st.markdown(f"## {city} — {multi_city_pricing[city]['days']} Days")
-
-            for day in all_itineraries[city]:
-                st.markdown(f"### Day {day_counter}: {day['title']}")
-
-                for activity in day["activities"]:
-                    st.markdown(f"- {activity}")
-
-                st.markdown(
-                    f"💰 **Cost:** ₹{day['day_cost_total']:,} "
-                    f"(Hotel: ₹{day['hotel_cost']:,}, Car: ₹{day['car_cost']:,})"
-                )
-
-                st.markdown("---")
-                day_counter += 1
-
-        # ------------------------------------------
-        # TRAVEL PLAN JSON
-        # ------------------------------------------
-        travel_plan = {
-            "cities": cities,
-            "days_per_city": days_per_city,
-            "travelers": travelers,
-            "hotel_star": star,
-            "sightseeing": all_sightseeing,
-            "itinerary": all_itineraries,
-            "pricing": multi_city_pricing,
-            "total_cost": total_cost,
-            "notes_per_city": city_notes
-        }
-
-        st.subheader("📦 Travel Plan JSON")
-        st.json(travel_plan)
-
-        # ------------------------------------------
-        # PDF GENERATION
-        # ------------------------------------------
-        buffer = io.BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=A4)
-        styles = getSampleStyleSheet()
-        story = []
-
-        story.append(Paragraph("Travel Quotation", styles["Heading1"]))
-        story.append(Spacer(1, 12))
-        story.append(Paragraph(f"Total Travelers: {travelers}", styles["Normal"]))
-        story.append(Paragraph(f"Hotel Category: {star}-Star", styles["Normal"]))
-        story.append(Paragraph(f"Grand Total: ₹{total_cost:,}", styles["Heading2"]))
-        story.append(Spacer(1, 12))
-
-        for city in cities:
-            data = multi_city_pricing[city]
-            story.append(Paragraph(f"=== {city} ({data['days']} Days) ===", styles["Heading2"]))
-            story.append(Paragraph(f"Hotel: {data['hotel_name']}", styles["Normal"]))
-            story.append(Paragraph(f"Hotel Total: ₹{data['hotel_cost_total']:,}", styles["Normal"]))
-            story.append(Paragraph(f"Car Total: ₹{data['car_cost_total']:,}", styles["Normal"]))
-            story.append(Paragraph(f"City Total: ₹{data['city_total']:,}", styles["Normal"]))
-            story.append(Spacer(1, 12))
-
-            if city_notes[city].strip():
-                story.append(Paragraph("Notes:", styles["Heading3"]))
-                for line in city_notes[city].split("\n"):
-                    story.append(Paragraph(line, styles["Normal"]))
-                story.append(Spacer(1, 12))
-
-            story.append(Paragraph("Sightseeing:", styles["Heading3"]))
+    st.subheader("🏞️ Sightseeing (City-wise)")
+    for city in cities:
+        st.markdown(f"### {city}")
+        if all_sightseeing[city]:
             for spot in all_sightseeing[city]:
-                story.append(Paragraph(f"{spot['place']}: {spot['description']}", styles["Normal"]))
+                st.markdown(f"- **{spot['place']}** — {spot['description']}")
+        else:
+            st.write("No sightseeing available.")
+        st.markdown("---")
+
+    st.subheader("📅 Day-by-Day Itinerary (City-wise)")
+
+    day_counter = 1  # running day number across all cities
+
+    for city in cities:
+        st.markdown(f"## {city} — {multi_city_pricing[city]['days']} Days")
+
+        for day in all_itineraries[city]:
+            st.markdown(f"### Day {day_counter}: {day['title']}")
+
+            for activity in day["activities"]:
+                st.markdown(f"- {activity}")
+
+            st.markdown(
+                f"💰 **Cost:** ₹{day['day_cost_total']:,} "
+                f"(Hotel: ₹{day['hotel_cost']:,}, Car: ₹{day['car_cost']:,})"
+            )
+
+            st.markdown("---")
+            day_counter += 1
+
+    # # ------------------------------------------
+    # # TRAVEL PLAN JSON
+    # # ------------------------------------------
+    # travel_plan = {
+    #     "cities": cities,
+    #     "days_per_city": days_per_city,
+    #     "travelers": travelers,
+    #     "hotel_star": star,
+    #     "sightseeing": all_sightseeing,
+    #     "itinerary": all_itineraries,
+    #     "pricing": multi_city_pricing,
+    #     "total_cost": total_cost,
+    #     "notes_per_city": city_notes
+    # }
+    #
+    # st.subheader("📦 Travel Plan JSON")
+    # st.json(travel_plan)
+
+    # ------------------------------------------
+    # PDF GENERATION
+    # ------------------------------------------
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    styles = getSampleStyleSheet()
+    story = []
+
+    story.append(Paragraph("Travel Quotation", styles["Heading1"]))
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(f"Total Travelers: {travelers}", styles["Normal"]))
+    story.append(Paragraph(f"Hotel Category: {star}-Star", styles["Normal"]))
+    story.append(Paragraph(f"Grand Total: ₹{total_cost:,}", styles["Heading2"]))
+    story.append(Spacer(1, 12))
+
+    for city in cities:
+        data = multi_city_pricing[city]
+        story.append(Paragraph(f"=== {city} ({data['days']} Days) ===", styles["Heading2"]))
+        story.append(Paragraph(f"Hotel: {data['hotel_name']}", styles["Normal"]))
+        story.append(Paragraph(f"Hotel Total: ₹{data['hotel_cost_total']:,}", styles["Normal"]))
+        story.append(Paragraph(f"Car Total: ₹{data['car_cost_total']:,}", styles["Normal"]))
+        story.append(Paragraph(f"City Total: ₹{data['city_total']:,}", styles["Normal"]))
+        story.append(Spacer(1, 12))
+
+        if city_notes[city].strip():
+            story.append(Paragraph("Notes:", styles["Heading3"]))
+            for line in city_notes[city].split("\n"):
+                story.append(Paragraph(line, styles["Normal"]))
             story.append(Spacer(1, 12))
 
-            story.append(Paragraph("Itinerary:", styles["Heading3"]))
-            for day in all_itineraries[city]:
-                story.append(Paragraph(f"Day {day['day']}: {day['title']}", styles["Normal"]))
-                for activity in day["activities"]:
-                    story.append(Paragraph(f"- {activity}", styles["Normal"]))
-                story.append(Paragraph(
-                    f"Day Cost: ₹{day['day_cost_total']:,}",
-                    styles["Normal"]
-                ))
-                story.append(Spacer(1, 12))
+        story.append(Paragraph("Sightseeing:", styles["Heading3"]))
+        for spot in all_sightseeing[city]:
+            story.append(Paragraph(f"{spot['place']}: {spot['description']}", styles["Normal"]))
+        story.append(Spacer(1, 12))
 
-        doc.build(story)
-        pdf_bytes = buffer.getvalue()
-        buffer.close()
+        story.append(Paragraph("Itinerary:", styles["Heading3"]))
+        for day in all_itineraries[city]:
+            story.append(Paragraph(f"Day {day['day']}: {day['title']}", styles["Normal"]))
+            for activity in day["activities"]:
+                story.append(Paragraph(f"- {activity}", styles["Normal"]))
+            story.append(Paragraph(
+                f"Day Cost: ₹{day['day_cost_total']:,}",
+                styles["Normal"]
+            ))
+            story.append(Spacer(1, 12))
 
-        st.download_button(
-            label="📄 Download PDF Quotation",
-            data=pdf_bytes,
-            file_name=f"multicity_quotation.pdf",
-            mime="application/pdf"
-        )
+    doc.build(story)
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+
+    st.download_button(
+        label="📄 Download PDF Quotation",
+        data=pdf_bytes,
+        file_name=f"multicity_quotation.pdf",
+        mime="application/pdf"
+    )
 
 
 if __name__ == "__main__":

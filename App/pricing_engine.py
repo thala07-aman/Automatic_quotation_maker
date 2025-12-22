@@ -34,3 +34,27 @@ def get_car_price(car_df, city):
     if df.empty:
         return None
     return df.iloc[0]["Price_Per_Day_Per_Car"]
+
+def get_hotel_options(hotels_df, city, preferred_star=None, limit=3):
+    df = hotels_df[hotels_df["City"].str.lower() == city.lower()]
+
+    if preferred_star:
+        df = df[df["Star"] == preferred_star]
+
+    if df.empty:
+        return []
+
+    # Sort by price (best value first)
+    df = df.sort_values("Price_Per_Night_Per_Person")
+
+    options = []
+    for _, row in df.head(limit).iterrows():
+        options.append({
+            "hotel_name": row["Hotel_Name"],
+            "star": row["Star"],
+            "price": row["Price_Per_Night_Per_Person"],
+            "image_url": row.get("Image_URL", "")
+        })
+
+    return options
+

@@ -1,4 +1,4 @@
-from App.main import generate_sightseeing
+from App.generate_sightseeing import generate_sightseeing
 from App.itinerary_builder import generate_itinerary
 
 
