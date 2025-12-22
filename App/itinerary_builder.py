@@ -55,8 +55,8 @@ Format:
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=800
+            temperature=0,
+            response_format={"type": "json_object"}
         )
 
         raw_output = response.choices[0].message.content.strip()

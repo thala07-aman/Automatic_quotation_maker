@@ -26,14 +26,14 @@ Task:
 Generate a sightseeing list for a client visiting {city} for {days} days, and also add the places from {note} if any.
 Limit to {max_places} well known places.
 
-Output format (strict JSON, no commentary):
+Return ONLY valid JSON in the following format:
 
 {{
   "city": "{city}",
   "sightseeing": [
     {{
-      "place": "<place_name>",
-      "description": "<single_sentence>"
+      "place": "Place name",
+      "description": "Single-line description. No line breaks."
     }}
   ]
 }}
@@ -46,12 +46,13 @@ Rules:
 - No disclaimers
 """
 
+
     try:
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=400
+            temperature=0,
+            response_format={"type": "json_object"}
         )
 
         raw_output = response.choices[0].message.content.strip()
