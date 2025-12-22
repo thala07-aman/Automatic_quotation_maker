@@ -284,27 +284,6 @@ def main():
             st.markdown("---")
             day_counter += 1
 
-    # # ------------------------------------------
-    # # TRAVEL PLAN JSON
-    # # ------------------------------------------
-    # travel_plan = {
-    #     "cities": cities,
-    #     "days_per_city": days_per_city,
-    #     "travelers": travelers,
-    #     "hotel_star": star,
-    #     "sightseeing": all_sightseeing,
-    #     "itinerary": all_itineraries,
-    #     "pricing": multi_city_pricing,
-    #     "total_cost": total_cost,
-    #     "notes_per_city": city_notes
-    # }
-    #
-    # st.subheader("📦 Travel Plan JSON")
-    # st.json(travel_plan)
-
-    # ------------------------------------------
-    # PDF GENERATION
-    # ------------------------------------------
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4)
     styles = getSampleStyleSheet()
