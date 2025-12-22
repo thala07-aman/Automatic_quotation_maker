@@ -12,6 +12,11 @@ from pricing_engine import load_pricing_data, get_hotel_price, get_car_price
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4
+from database import init_db, save_quotation, get_all_quotations, get_connection, migrate_schema
+
+init_db()
+migrate_schema()
+
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
@@ -73,6 +78,15 @@ def main():
     # ------------------------------------------
     # CITY SELECTION
     # ------------------------------------------
+    customer_name = st.text_input(
+        "Customer Name",
+        placeholder="Enter customer name"
+    )
+
+    if not customer_name.strip():
+        st.error("Customer name is required.")
+        st.stop()
+
     unique_cities = sorted(hotels_df["City"].unique().tolist())
 
     cities = st.multiselect(
@@ -88,6 +102,7 @@ def main():
     # ------------------------------------------
     # DAY INPUT
     # ------------------------------------------
+
     days_input = st.text_input(
         "Enter comma-separated days per city",
         placeholder="Example: 2,1,3"
@@ -284,6 +299,34 @@ def main():
             st.markdown("---")
             day_counter += 1
 
+    # ------------------------------------------
+    # TRAVEL PLAN JSON
+    # ------------------------------------------
+    travel_plan = {
+        "cities": cities,
+        "days_per_city": days_per_city,
+        "travelers": travelers,
+        "hotel_star": star,
+        "sightseeing": all_sightseeing,
+        "itinerary": all_itineraries,
+        "pricing": multi_city_pricing,
+        "total_cost": total_cost,
+        "notes_per_city": city_notes
+    }
+
+    quotation_no = save_quotation(
+        customer_name=customer_name,
+        cities=cities,
+        total_cost=total_cost,
+        quotation_data=travel_plan
+    )
+
+    st.success(f"Quotation saved successfully! ID: {quotation_no}")
+
+    # ------------------------------------------
+    # PDF GENERATION
+    # ------------------------------------------
+
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4)
     styles = getSampleStyleSheet()
@@ -337,6 +380,19 @@ def main():
         file_name=f"multicity_quotation.pdf",
         mime="application/pdf"
     )
+
+    st.markdown("---")
+    st.subheader("📂 Quotation History")
+
+    rows = get_all_quotations()
+
+    if not rows:
+        st.info("No quotations saved yet.")
+    else:
+        for q in rows:
+            st.write(
+                f"🧾 {q[0]} | 👤 {q[1]} | 📍 {q[2]} | 💰 ₹{q[3]:,} | 🕒 {q[4]}"
+            )
 
 
 if __name__ == "__main__":
