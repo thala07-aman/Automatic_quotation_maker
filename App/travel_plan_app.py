@@ -32,6 +32,8 @@ if "city_data" not in st.session_state:
 if "selected_option" not in st.session_state:
     st.session_state.selected_option = {}
 
+if "price_override" not in st.session_state:
+    st.session_state.price_override = {}
 
 
 def explain_hotel_choice(city, hotel_name, star):
@@ -197,6 +199,24 @@ def main():
             st.session_state.selected_option[city] = selected_index
             selected_hotel = options[selected_index]
 
+            st.subheader("💸 Hotel Price Adjustment")
+
+            base_price = selected_hotel["price"]
+
+            override_price = st.number_input(
+                f"Override hotel price per night (per person) for {city}",
+                min_value=0,
+                value=int(base_price),
+                step=100,
+                key=f"override_{city}"
+            )
+
+            # Save override only if changed
+            if override_price != base_price:
+                st.session_state.price_override[city] = override_price
+            else:
+                st.session_state.price_override.pop(city, None)
+
             for i, opt in enumerate(options):
                 st.markdown(f"### {labels[i]}")
                 st.write(f"**{opt['hotel_name']}** ({opt['star']}-Star)")
@@ -204,8 +224,15 @@ def main():
                 st.write(f"Price per night per person: ₹{opt['price']:,}")
                 st.markdown("---")
 
+            effective_price = st.session_state.price_override.get(city, selected_hotel["price"])
             hotel_name = selected_hotel["hotel_name"]
-            hotel_price = selected_hotel["price"]
+            hotel_price = effective_price
+
+            if city in st.session_state.price_override:
+                st.info(
+                    f"Using overridden hotel price: ₹{effective_price:,} "
+                    f"(Original: ₹{base_price:,})"
+                )
 
             car_price = get_car_price(car_df, city)
 
@@ -222,11 +249,12 @@ def main():
             multi_city_pricing[city] = {
                 "days": days,
                 "hotel_name": hotel_name,
-                "hotel_price": hotel_price,
+                "base_price": selected_hotel["price"],
+                "final_price": st.session_state.price_override.get(city, selected_hotel["price"]),
                 "car_price": car_price,
                 "hotel_cost_total": hotel_cost_total,
                 "car_cost_total": car_cost_total,
-                "city_total": city_total
+                "city_total": city_total,
             }
 
             # --- sightseeing ---
