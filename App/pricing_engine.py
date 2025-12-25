@@ -16,7 +16,6 @@ def load_pricing_data(uploaded_file):
     except Exception as e:
         return None, None
 
-
 def get_hotel_price(hotels_df, city, star):
     df = hotels_df[
         (hotels_df["City"].str.lower() == city.lower()) &

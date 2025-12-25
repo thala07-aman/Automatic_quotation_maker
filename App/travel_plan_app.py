@@ -2,7 +2,7 @@ import os
 
 import streamlit as st
 import io
-
+import re
 from groq import Groq
 
 from generate_sightseeing import generate_sightseeing
@@ -36,6 +36,25 @@ if "selected_option" not in st.session_state:
 
 if "price_override" not in st.session_state:
     st.session_state.price_override = {}
+
+if "finalized" not in st.session_state:
+    st.session_state.finalized = False
+
+if "quotation_no" not in st.session_state:
+    st.session_state.quotation_no = None
+
+
+
+
+def safe_filename(name: str) -> str:
+    """
+    Convert customer name into a safe filename.
+    """
+    name = name.strip()
+    name = re.sub(r"\s+", "_", name)          # spaces → underscore
+    name = re.sub(r"[^a-zA-Z0-9_-]", "", name)  # remove special chars
+    return name or "quotation"
+
 
 
 def explain_hotel_choice(city, hotel_name, star):
@@ -145,7 +164,7 @@ def main():
     # ------------------------------------------
     # PROCESS BUTTON
     # ------------------------------------------
-    if st.button("Generate Multi-City Quotation"):
+    if st.button("Generate Travel Quotation"):
         st.session_state.generated = True
         st.session_state.hotel_options = None
         st.session_state.sightseeing = None
@@ -430,14 +449,35 @@ def main():
 
     }
 
-    quotation_no = save_quotation(
-        customer_name=customer_name,
-        cities=cities,
-        total_cost=total_cost,
-        quotation_data=travel_plan
-    )
+    # quotation_no = save_quotation(
+    #     customer_name=customer_name,
+    #     cities=cities,
+    #     total_cost=total_cost,
+    #     quotation_data=travel_plan
+    # )
 
-    st.success(f"Quotation saved successfully! ID: {quotation_no}")
+    st.markdown("---")
+    st.subheader("✅ Finalize Quotation")
+
+    if not st.session_state.finalized:
+        if st.button("Generate Final Quotation"):
+            quotation_no = save_quotation(
+                customer_name=customer_name,
+                cities=cities,
+                total_cost=total_cost,
+                quotation_data=travel_plan
+            )
+
+            st.session_state.quotation_no = quotation_no
+            st.session_state.finalized = True
+
+            st.success(f"Quotation finalized successfully: {quotation_no}")
+
+    if st.session_state.finalized:
+        if st.button("🔄 Create New Quotation"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
 
     # ------------------------------------------
     # PDF GENERATION
@@ -515,12 +555,19 @@ def main():
     pdf_bytes = buffer.getvalue()
     buffer.close()
 
-    st.download_button(
-        label="📄 Download PDF Quotation",
-        data=pdf_bytes,
-        file_name=f"multicity_quotation.pdf",
-        mime="application/pdf"
-    )
+    file_base = safe_filename(customer_name)
+
+    if st.session_state.finalized:
+        file_base = safe_filename(customer_name)
+
+        st.download_button(
+            label="📄 Download PDF Quotation",
+            data=pdf_bytes,
+            file_name=f"{file_base}_{st.session_state.quotation_no}.pdf",
+            mime="application/pdf"
+        )
+    else:
+        st.info("Finalize the quotation to enable PDF download.")
 
     st.markdown("---")
     st.subheader("📂 Quotation History")
