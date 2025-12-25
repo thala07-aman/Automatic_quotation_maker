@@ -27,13 +27,23 @@ def get_hotel_price(hotels_df, city, star):
     return df.iloc[0]["Price_Per_Night_Per_Person"], df.iloc[0]["Hotel_Name"]
 
 
-def get_car_price(car_df, city):
-    df = car_df[
-        (car_df["City"].str.lower() == city.lower())
-    ]
-    if df.empty:
-        return None
-    return df.iloc[0]["Price_Per_Day_Per_Car"]
+def get_car_options(car_df):
+    car_df = car_df.copy()
+    car_df.columns = car_df.columns.str.strip().str.lower()
+
+    required_cols = {"car_type", "price_per_day"}
+    if not required_cols.issubset(set(car_df.columns)):
+        raise ValueError(
+            f"CarRental sheet must contain columns: {required_cols}. "
+            f"Found: {car_df.columns.tolist()}"
+        )
+
+    options = {}
+    for _, row in car_df.iterrows():
+        options[row["car_type"]] = row["price_per_day"]
+
+    return options
+
 
 def get_hotel_options(hotels_df, city, preferred_star=None, limit=3):
     df = hotels_df[hotels_df["City"].str.lower() == city.lower()]

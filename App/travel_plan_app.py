@@ -7,7 +7,9 @@ from groq import Groq
 
 from generate_sightseeing import generate_sightseeing
 from itinerary_builder import generate_itinerary
-from pricing_engine import load_pricing_data, get_hotel_price, get_car_price
+from pricing_engine import load_pricing_data, get_hotel_price
+from pricing_engine import get_car_options
+
 
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
@@ -199,6 +201,34 @@ def main():
             st.session_state.selected_option[city] = selected_index
             selected_hotel = options[selected_index]
 
+            st.subheader("🛏️ Room Configuration")
+
+            rooms = st.number_input(
+                f"Number of rooms in {city}",
+                min_value=1,
+                max_value=10,
+                value=max(1, travelers // 2),
+                key=f"rooms_{city}"
+            )
+
+            extra_bed = False
+            extra_bed_price = 0
+
+            if travelers > (rooms * 2):
+                extra_bed = st.checkbox(
+                    f"Add extra bed in {city}",
+                    key=f"extra_bed_{city}"
+                )
+
+                if extra_bed:
+                    extra_bed_price = st.number_input(
+                        f"Extra bed price per night in {city}",
+                        min_value=0,
+                        value=1500,
+                        step=100,
+                        key=f"extra_bed_price_{city}"
+                    )
+
             st.subheader("💸 Hotel Price Adjustment")
 
             base_price = selected_hotel["price"]
@@ -226,7 +256,14 @@ def main():
 
             effective_price = st.session_state.price_override.get(city, selected_hotel["price"])
             hotel_name = selected_hotel["hotel_name"]
-            hotel_price = effective_price
+
+            hotel_room_cost = effective_price * rooms * days
+
+            extra_bed_cost = 0
+            if extra_bed:
+                extra_bed_cost = extra_bed_price * days
+
+            hotel_cost = hotel_room_cost + extra_bed_cost
 
             if city in st.session_state.price_override:
                 st.info(
@@ -234,10 +271,37 @@ def main():
                     f"(Original: ₹{base_price:,})"
                 )
 
-            car_price = get_car_price(car_df, city)
+            st.subheader("🚗 Car Requirement")
 
-            hotel_cost_total = hotel_price * travelers * days
-            car_cost_total = car_price * days if car_price else 0
+            want_car = st.checkbox(
+                f"Do you want a car in {city}?",
+                key=f"want_car_{city}"
+            )
+
+            car_type = None
+            car_price_per_day = 0
+            car_cost = 0
+
+            if want_car:
+                car_options = get_car_options(car_df)
+
+                car_type = st.radio(
+                    f"Select car type for {city}",
+                    options=list(car_options.keys()),
+                    key=f"car_type_{city}"
+                )
+
+                car_price_per_day = car_options[car_type]
+                car_cost = car_price_per_day
+
+                st.info(
+                    f"{car_type}: ₹{car_price_per_day:,} per day × {days} days = ₹{car_cost:,}"
+                )
+            else:
+                st.info("No car selected for this city.")
+
+            hotel_cost_total = hotel_cost
+            car_cost_total = car_cost * days if car_cost else 0
 
             city_total = hotel_cost_total + car_cost_total
             total_cost += city_total
@@ -246,12 +310,20 @@ def main():
             cost_per_day_hotel = hotel_cost_total / days
             cost_per_day_car = car_cost_total / days if car_cost_total else 0
 
+            st.info(
+                f"""
+                Hotel Pricing Breakdown for {city}:
+                - Rooms: {rooms} × ₹{effective_price:,} × {days} nights = ₹{hotel_room_cost:,}
+                - Extra Bed: ₹{extra_bed_price:,} × {days} nights = ₹{extra_bed_cost:,}
+                """
+            )
+
             multi_city_pricing[city] = {
                 "days": days,
                 "hotel_name": hotel_name,
                 "base_price": selected_hotel["price"],
                 "final_price": st.session_state.price_override.get(city, selected_hotel["price"]),
-                "car_price": car_price,
+                "car_price": car_cost,
                 "hotel_cost_total": hotel_cost_total,
                 "car_cost_total": car_cost_total,
                 "city_total": city_total,
@@ -339,7 +411,23 @@ def main():
         "itinerary": all_itineraries,
         "pricing": multi_city_pricing,
         "total_cost": total_cost,
-        "notes_per_city": city_notes
+        "notes_per_city": city_notes,
+        "room_config": {
+            city: {
+                "rooms": rooms,
+                "extra_bed": extra_bed,
+                "extra_bed_cost_per_night": extra_bed_cost
+            }
+        },
+        "car_details": {
+            city: {
+                "required": want_car,
+                "car_type": car_type,
+                "price_per_day": car_price_per_day,
+                "total_car_cost": car_cost
+            }
+        }
+
     }
 
     quotation_no = save_quotation(
@@ -374,6 +462,31 @@ def main():
         story.append(Paragraph(f"Hotel Total: ₹{data['hotel_cost_total']:,}", styles["Normal"]))
         story.append(Paragraph(f"Car Total: ₹{data['car_cost_total']:,}", styles["Normal"]))
         story.append(Paragraph(f"City Total: ₹{data['city_total']:,}", styles["Normal"]))
+        story.append(
+            Paragraph(
+                f"Rooms: {rooms} | Extra Bed: {'Yes' if extra_bed else 'No'}",
+                styles["Normal"]
+            )
+        )
+
+        story.append(
+            Paragraph(
+                f"Hotel Cost: ₹{hotel_cost:,}",
+                styles["Normal"]
+            )
+        )
+        if car_cost > 0:
+            story.append(
+                Paragraph(
+                    f"Car: {car_type} — ₹{car_price_per_day:,} per day × {days} days = ₹{car_cost:,}",
+                    styles["Normal"]
+                )
+            )
+        else:
+            story.append(
+                Paragraph("Car: Not included", styles["Normal"])
+            )
+
         story.append(Spacer(1, 12))
 
         if city_notes[city].strip():
