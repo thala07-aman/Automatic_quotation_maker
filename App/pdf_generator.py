@@ -231,10 +231,12 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
     story.append(Paragraph("Trip Summary", styles['SectionHeader']))
     
     summary_data = [
-        ['<b>Destination</b>', cities_str],
-        ['<b>Duration</b>', f"{sum(quotation_data['days_per_city'])} Days / {sum(quotation_data['days_per_city']) - 1} Nights"],
-        ['<b>Travelers</b>', str(travelers)],
-        ['<b>Hotel Category</b>', f"{quotation_data['hotel_star']}-Star"],
+        [Paragraph('<b>Destination</b>', styles['Normal']), Paragraph(cities_str, styles['Normal'])],
+        [Paragraph('<b>Duration</b>', styles['Normal']), Paragraph(f"{sum(quotation_data['days_per_city'])} Days / {sum(quotation_data['days_per_city']) - 1} Nights", styles['Normal'])],
+        [Paragraph('<b>Arrival Date</b>', styles['Normal']), Paragraph(quotation_data.get('arrival_date', 'Not specified'), styles['Normal'])],
+        [Paragraph('<b>Departure Date</b>', styles['Normal']), Paragraph(quotation_data.get('departure_date', 'Not specified'), styles['Normal'])],
+        [Paragraph('<b>Travelers</b>', styles['Normal']), Paragraph(str(travelers), styles['Normal'])],
+        [Paragraph('<b>Hotel Category</b>', styles['Normal']), Paragraph(f"{quotation_data['hotel_star']}-Star", styles['Normal'])],
     ]
     
     summary_table = Table(summary_data, colWidths=[2*inch, 5*inch])
@@ -242,10 +244,8 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
         ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#F5F5F5')),
         ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 0), (-1, -1), 10),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
         ('TOPPADDING', (0, 0), (-1, -1), 8),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
     ]))
@@ -283,16 +283,6 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
     for city in quotation_data['cities']:
         itinerary = quotation_data['itinerary'][city]
         
-        # Add city overview image at the start
-        try:
-            city_images = fetch_city_images(city, num_images=1)
-            if city_images.get('overview'):
-                img = RLImage(io.BytesIO(city_images['overview']), width=5*inch, height=3.75*inch)
-                story.append(img)
-                story.append(Spacer(1, 12))
-        except:
-            pass
-        
         for day in itinerary:
             # Day header with dark background
             day_header = f"Day {day_counter:02d}: {day['title']}"
@@ -313,22 +303,95 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
             
             story.append(Spacer(1, 12))
             
-            # Add day-specific landmark image if available
-            if day.get('key_landmark'):
-                try:
-                    from image_fetcher import fetch_destination_image, resize_image_for_pdf
-                    landmark_img = fetch_destination_image(city, day['key_landmark'])
-                    if landmark_img:
-                        resized_img = resize_image_for_pdf(landmark_img)
-                        img = RLImage(io.BytesIO(resized_img), width=5*inch, height=3.75*inch)
-                        story.append(img)
-                        story.append(Paragraph(
-                            f"<i>{day['key_landmark']}</i>",
-                            styles['Normal']
-                        ))
-                        story.append(Spacer(1, 12))
-                except Exception as e:
-                    pass  # Skip if image fails to load
+            # Add 2 images of landmarks from the day's itinerary (9.1 cm width × 5.93 cm height each)
+            try:
+                from image_fetcher import fetch_day_images_from_landmarks, fetch_destination_image, resize_image_for_pdf
+                
+                # Get landmarks from the itinerary for this day
+                landmarks = day.get('landmarks', [])
+                
+                # Fallback: if no landmarks array, try to extract from activities or use key_landmark
+                if not landmarks or len(landmarks) < 2:
+                    landmarks = []
+                    # Try key_landmark first
+                    if day.get('key_landmark'):
+                        landmarks.append(day['key_landmark'])
+                    # Try to extract landmarks from activities
+                    for activity in day.get('activities', []):
+                        if 'visit' in activity.lower() or 'explore' in activity.lower():
+                            # Extract potential landmark names (simple heuristic)
+                            words = activity.split()
+                            for i, word in enumerate(words):
+                                if word.lower() in ['visit', 'explore', 'see']:
+                                    if i + 1 < len(words):
+                                        potential_landmark = ' '.join(words[i+1:i+4])  # Take next 3 words
+                                        landmarks.append(potential_landmark.strip('.,!?'))
+                                        break
+                        if len(landmarks) >= 2:
+                            break
+                    
+                    # Final fallback: use generic city searches
+                    if len(landmarks) < 2:
+                        landmarks.append(f"{city} landmark")
+                        landmarks.append(f"{city} attraction")
+                
+                # Ensure we have exactly 2 landmarks
+                landmarks = landmarks[:2]  # Take first 2
+                while len(landmarks) < 2:
+                    landmarks.append(f"{city} tourism")
+                
+                day_images = fetch_day_images_from_landmarks(city, landmarks)
+                
+                # Create a table with 2 images in one row
+                image_row = []
+                caption_row = []
+                
+                if day_images.get('image1'):
+                    img1 = RLImage(io.BytesIO(day_images['image1']), width=3.58*inch, height=2.33*inch)
+                    image_row.append(img1)
+                    caption_row.append(Paragraph(
+                        f"<i>{day_images.get('landmark1_name', landmarks[0])}</i>",
+                        styles['Normal']
+                    ))
+                else:
+                    image_row.append('')
+                    caption_row.append('')
+                
+                if day_images.get('image2'):
+                    img2 = RLImage(io.BytesIO(day_images['image2']), width=3.58*inch, height=2.33*inch)
+                    image_row.append(img2)
+                    caption_row.append(Paragraph(
+                        f"<i>{day_images.get('landmark2_name', landmarks[1])}</i>",
+                        styles['Normal']
+                    ))
+                else:
+                    image_row.append('')
+                    caption_row.append('')
+                
+                # Only add the table if we have at least one image
+                if len([x for x in image_row if x != '']) > 0:
+                    # Images table
+                    images_table = Table([image_row], colWidths=[3.58*inch, 3.58*inch])
+                    images_table.setStyle(TableStyle([
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                        ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+                    ]))
+                    story.append(images_table)
+                    
+                    # Captions table
+                    story.append(Spacer(1, 4))
+                    captions_table = Table([caption_row], colWidths=[3.58*inch, 3.58*inch])
+                    captions_table.setStyle(TableStyle([
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ]))
+                    story.append(captions_table)
+                    story.append(Spacer(1, 12))
+            except Exception as e:
+                print(f"Error fetching images for day {day_counter}: {e}")
+                pass  # Skip if images fail to load
             
             day_counter += 1
     
@@ -348,7 +411,7 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
     ]
     
     for item in inclusions:
-        story.append(Paragraph(f"{len(story) - story.index(story[-1])}. {item}", styles['Normal']))
+        story.append(Paragraph(f"• {item}", styles['Normal']))
     story.append(Spacer(1, 20))
     
     # ==========================================

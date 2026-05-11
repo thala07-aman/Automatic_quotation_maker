@@ -10,9 +10,12 @@ import os
 from typing import Optional, Dict
 import streamlit as st
 
-# Unsplash API configuration
-UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "")
-UNSPLASH_API_URL = "https://api.unsplash.com/search/photos"
+# Image API configuration
+# UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "")
+# UNSPLASH_API_URL = "https://api.unsplash.com/search/photos"
+
+PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
+PEXELS_API_URL = "https://api.pexels.com/v1/search"
 
 # Fallback: Use placeholder images if API key not available
 PLACEHOLDER_IMAGE_URL = "https://via.placeholder.com/800x600/4A4A4A/FFFFFF?text="
@@ -38,46 +41,51 @@ def fetch_destination_image(city: str, landmark: str = None) -> Optional[bytes]:
         query = f"{city} travel destination"
     
     try:
-        # Try Unsplash API if key is available
-        if UNSPLASH_ACCESS_KEY:
-            return fetch_from_unsplash(query)
-        else:
-            # Fallback to placeholder
-            return fetch_placeholder_image(city, landmark)
+        # Try Pexels first (better for landmarks), then Unsplash
+        if PEXELS_API_KEY:
+            img = fetch_from_pexels(query)
+            if img:
+                return img
+        
+        
+        # Fallback to placeholder
+        return fetch_placeholder_image(city, landmark)
             
     except Exception as e:
         print(f"Error fetching image for {query}: {e}")
         return fetch_placeholder_image(city, landmark)
 
 
-def fetch_from_unsplash(query: str) -> Optional[bytes]:
-    """Fetch image from Unsplash API"""
+def fetch_from_pexels(query: str) -> Optional[bytes]:
+    """Fetch image from Pexels API"""
     
     headers = {
-        "Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"
+        "Authorization": PEXELS_API_KEY
     }
     
     params = {
         "query": query,
         "per_page": 1,
-        "orientation": "landscape",
-        "content_filter": "high"
+        "orientation": "landscape"
     }
     
-    response = requests.get(UNSPLASH_API_URL, headers=headers, params=params, timeout=10)
-    
-    if response.status_code == 200:
-        data = response.json()
+    try:
+        response = requests.get(PEXELS_API_URL, headers=headers, params=params, timeout=10)
         
-        if data.get("results") and len(data["results"]) > 0:
-            # Get the regular size image URL
-            image_url = data["results"][0]["urls"]["regular"]
+        if response.status_code == 200:
+            data = response.json()
             
-            # Download the image
-            img_response = requests.get(image_url, timeout=10)
-            
-            if img_response.status_code == 200:
-                return img_response.content
+            if data.get("photos") and len(data["photos"]) > 0:
+                # Get the large size image URL
+                image_url = data["photos"][0]["src"]["large"]
+                
+                # Download the image
+                img_response = requests.get(image_url, timeout=10)
+                
+                if img_response.status_code == 200:
+                    return img_response.content
+    except Exception as e:
+        print(f"Pexels API error: {e}")
     
     return None
 
@@ -117,14 +125,14 @@ def fetch_placeholder_image(city: str, landmark: str = None) -> bytes:
     return buffer.getvalue()
 
 
-def resize_image_for_pdf(image_bytes: bytes, max_width: int = 500, max_height: int = 375) -> bytes:
+def resize_image_for_pdf(image_bytes: bytes, max_width: int = 344, max_height: int = 224) -> bytes:
     """
-    Resize image to fit PDF layout while maintaining aspect ratio.
+    Resize image to fit PDF layout (9.1 cm width × 5.93 cm height).
     
     Args:
         image_bytes: Original image bytes
-        max_width: Maximum width in pixels
-        max_height: Maximum height in pixels
+        max_width: Maximum width in pixels (344px = 9.1cm)
+        max_height: Maximum height in pixels (224px = 5.93cm)
         
     Returns:
         Resized image bytes
@@ -178,24 +186,70 @@ def fetch_city_images(city: str, num_images: int = 2) -> Dict[str, bytes]:
     return images
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_day_images_from_landmarks(city: str, landmarks: list) -> Dict[str, bytes]:
+    """
+    Fetch 2 images for specific landmarks mentioned in the day's itinerary.
+    
+    Args:
+        city: City name
+        landmarks: List of 2 landmark names from the itinerary
+        
+    Returns:
+        Dictionary with 'image1' and 'image2' keys containing image bytes
+    """
+    images = {}
+    
+    # Fetch first landmark image
+    if landmarks and len(landmarks) > 0:
+        landmark1 = landmarks[0]
+        img1 = fetch_destination_image(city, landmark1)
+        if img1:
+            images['image1'] = resize_image_for_pdf(img1)
+            images['landmark1_name'] = landmark1
+    
+    # Fetch second landmark image
+    if landmarks and len(landmarks) > 1:
+        landmark2 = landmarks[1]
+        img2 = fetch_destination_image(city, landmark2)
+        if img2:
+            images['image2'] = resize_image_for_pdf(img2)
+            images['landmark2_name'] = landmark2
+    
+    return images
+
+
 def setup_unsplash_api():
     """
-    Setup instructions for Unsplash API.
+    Setup instructions for Image APIs.
     Call this to display setup info in Streamlit.
     """
     st.info("""
     ### 🖼️ Image Feature Setup (Optional)
     
-    To enable automatic destination images in PDFs:
+    To enable automatic destination images in PDFs, choose one or both:
     
-    1. Get a free Unsplash API key from: https://unsplash.com/developers
+    **Option 1: Pexels (Recommended for landmarks)**
+    1. Get a free API key from: https://www.pexels.com/api/
+    2. Add to your `.env` file:
+       ```
+       PEXELS_API_KEY=your_api_key_here
+       ```
+    
+    **Option 2: Unsplash**
+    1. Get a free API key from: https://unsplash.com/developers
     2. Add to your `.env` file:
        ```
        UNSPLASH_ACCESS_KEY=your_access_key_here
        ```
+    
+    **Benefits:**
+    - Pexels: Excellent landmark and travel photos, easier setup
+    - Unsplash: High-quality artistic photos
+    - Use both for better coverage (Pexels tried first)
+    
     3. Restart the application
     
     **Note**: Without an API key, placeholder images will be used.
     """)
 
-# Made with Bob
