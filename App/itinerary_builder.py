@@ -33,6 +33,8 @@ You are an experienced travel planner creating a detailed day-by-day itinerary f
 Available Attractions:
 {sightseeing_details}
 
+CRITICAL: Create EXACTLY {days} day(s) itinerary - no more, no less. The itinerary array must contain exactly {days} day objects.
+
 Create a {days}-day itinerary following this structure:
 
 Day 1 Guidelines:
@@ -81,7 +83,8 @@ Required JSON Format:
         "Evening visit to [landmark]",
         "Dinner at hotel/local restaurant"
       ],
-      "key_landmark": "[main attraction for this day]"
+      "key_landmark": "[main attraction for this day]",
+      "landmarks": ["[landmark 1]", "[landmark 2]"]
     }},
     {{
       "day": 2,
@@ -94,12 +97,15 @@ Required JSON Format:
         "Evening: [activity]",
         "Return to hotel"
       ],
-      "key_landmark": "[main attraction for this day]"
+      "key_landmark": "[main attraction for this day]",
+      "landmarks": ["[landmark 1]", "[landmark 2]"]
     }}
   ]
 }}
 
-CRITICAL: Include "key_landmark" field for each day with the main attraction to visit that day.
+CRITICAL:
+1. Include "key_landmark" field for each day with the main attraction to visit that day.
+2. Include "landmarks" array with exactly 2 specific landmarks/attractions that will be visited that day (these should be from the activities list).
 """
 
     try:
@@ -113,6 +119,18 @@ CRITICAL: Include "key_landmark" field for each day with the main attraction to 
         raw_output = response.choices[0].message.content.strip()
         itinerary_data = json.loads(raw_output)
 
+        # VALIDATION: Ensure correct number of days
+        if "itinerary" in itinerary_data:
+            actual_days = len(itinerary_data["itinerary"])
+            
+            if actual_days > days:
+                # Trim excess days
+                print(f"Warning: AI generated {actual_days} days instead of {days}. Trimming to {days} days.")
+                itinerary_data["itinerary"] = itinerary_data["itinerary"][:days]
+            elif actual_days < days:
+                # Log warning but continue
+                print(f"Warning: AI generated only {actual_days} days instead of {days}.")
+        
         # attach cost to each day
         for day in itinerary_data["itinerary"]:
             day["day_cost_total"] = round(cost_per_day_total, 2)

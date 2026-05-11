@@ -100,11 +100,16 @@ def main():
     with st.sidebar:
         st.header("⚙️ Settings")
         
-        # Check if Unsplash API is configured
+        # Check if image APIs are configured
+        pexels_key = os.getenv("PEXELS_API_KEY", "")
         unsplash_key = os.getenv("UNSPLASH_ACCESS_KEY", "")
         
-        if unsplash_key:
+        if pexels_key or unsplash_key:
             st.success("✅ Destination images enabled")
+            if pexels_key:
+                st.caption("🔹 Pexels API: Active")
+            if unsplash_key:
+                st.caption("🔹 Unsplash API: Active")
             st.caption("PDFs will include beautiful destination photos")
         else:
             with st.expander("🖼️ Enable Destination Images", expanded=False):
@@ -138,6 +143,28 @@ def main():
 
     if not customer_name.strip():
         st.error("Customer name is required.")
+        st.stop()
+    
+    # ------------------------------------------
+    # TRAVEL DATES
+    # ------------------------------------------
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        arrival_date = st.date_input(
+            "Arrival Date",
+            help="Select the arrival date for the trip"
+        )
+    
+    with col2:
+        departure_date = st.date_input(
+            "Departure Date",
+            help="Select the departure date for the trip"
+        )
+    
+    # Validate dates
+    if departure_date <= arrival_date:
+        st.error("Departure date must be after arrival date.")
         st.stop()
 
     unique_cities = sorted(hotels_df["City"].unique().tolist())
@@ -504,7 +531,9 @@ def main():
         "total_cost": total_cost,
         "notes_per_city": city_notes,
         "room_config": room_config,  # FIX: Use collected data
-        "car_details": car_details   # FIX: Use collected data
+        "car_details": car_details,   # FIX: Use collected data
+        "arrival_date": arrival_date.strftime("%d %B %Y"),  # Format: 15 January 2026
+        "departure_date": departure_date.strftime("%d %B %Y")
     }
 
     st.markdown("---")
