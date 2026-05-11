@@ -3,24 +3,30 @@ import os
 import streamlit as st
 import io
 import re
-from groq import Groq
+from openai import OpenAI
 
 from generate_sightseeing import generate_sightseeing
 from itinerary_builder import generate_itinerary
-from pricing_engine import load_pricing_data, get_hotel_price
+from pricing_engine import load_pricing_data
 from pricing_engine import get_car_options
-
 
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4
-from database import init_db, save_quotation, get_all_quotations, get_connection, migrate_schema
+from database import init_db, save_quotation, get_all_quotations, migrate_schema
+from pdf_generator import generate_professional_pdf
+from image_fetcher import setup_unsplash_api
+
+# FIX: Configuration constants
+DEFAULT_EXTRA_BED_PRICE = 1500
+DEFAULT_ROOM_CALCULATION_DIVISOR = 2
+AI_CACHE_TTL = 3600  # 1 hour
 
 init_db()
 migrate_schema()
 
-
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+# Initialize OpenAI client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ===============================
 # SESSION STATE
@@ -44,8 +50,6 @@ if "quotation_no" not in st.session_state:
     st.session_state.quotation_no = None
 
 
-
-
 def safe_filename(name: str) -> str:
     """
     Convert customer name into a safe filename.
@@ -56,8 +60,12 @@ def safe_filename(name: str) -> str:
     return name or "quotation"
 
 
-
+@st.cache_data(ttl=AI_CACHE_TTL, show_spinner=False)
 def explain_hotel_choice(city, hotel_name, star):
+    """
+    Generate AI-powered hotel recommendation with error handling.
+    Cached for 1 hour to avoid redundant API calls.
+    """
     prompt = f"""
 You are a travel consultant.
 Explain in 2 short professional sentences why {hotel_name}, a {star}-star hotel in {city},
@@ -70,18 +78,40 @@ Rules:
 - Business-professional tone
 """
 
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
-    )
-
-    return response.choices[0].message.content.strip()
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        # Fallback if AI fails
+        return f"{hotel_name} is a well-rated {star}-star property in {city}. It offers comfortable accommodations suitable for travelers."
 
 
 def main():
     st.set_page_config(page_title="Multi-City Travel Builder", layout="wide")
     st.title("🧳 Multi-City Travel Quotation Builder")
+
+    # ------------------------------------------
+    # SIDEBAR - IMAGE FEATURE INFO
+    # ------------------------------------------
+    with st.sidebar:
+        st.header("⚙️ Settings")
+        
+        # Check if Unsplash API is configured
+        unsplash_key = os.getenv("UNSPLASH_ACCESS_KEY", "")
+        
+        if unsplash_key:
+            st.success("✅ Destination images enabled")
+            st.caption("PDFs will include beautiful destination photos")
+        else:
+            with st.expander("🖼️ Enable Destination Images", expanded=False):
+                setup_unsplash_api()
+        
+        st.markdown("---")
+        st.caption("💡 Tip: Images are cached for 24 hours to improve performance")
 
     # ------------------------------------------
     # UPLOAD PRICING EXCEL
@@ -133,7 +163,11 @@ def main():
 
     try:
         days_per_city = [int(x.strip()) for x in days_input.split(",")]
-    except:
+        # FIX: Validate days are positive
+        if any(d <= 0 for d in days_per_city):
+            st.error("Days must be positive numbers (greater than 0)")
+            return
+    except ValueError:
         st.warning("Enter numbers only — like 2,1,3")
         return
 
@@ -144,7 +178,7 @@ def main():
     # ------------------------------------------
     # OTHER INPUTS
     # ------------------------------------------
-    travelers = st.number_input("Travelers", min_value=1, max_value=20, value=2)
+    travelers = st.number_input("Travelers", min_value=1, max_value=50, value=2, help="Number of people traveling")
     star = st.selectbox("Hotel Category", options=[2, 3, 4, 5], index=2)
     max_places = st.number_input("Sightseeing places per city", min_value=1, max_value=20, value=6)
 
@@ -177,11 +211,19 @@ def main():
     multi_city_pricing = {}
     all_sightseeing = {}
     all_itineraries = {}
+    room_config = {}  # FIX: Initialize outside loop
+    car_details = {}  # FIX: Initialize outside loop
+
+    # FIX: Add progress indicator
+    progress_bar = st.progress(0)
+    progress_text = st.empty()
 
     # ------------------------------
     # LOOP PER CITY
     # ------------------------------
-    for city, days in zip(cities, days_per_city):
+    for idx, (city, days) in enumerate(zip(cities, days_per_city)):
+        progress_text.text(f"Processing {city}... ({idx + 1}/{len(cities)})")
+        progress_bar.progress((idx + 1) / len(cities))
 
         if city not in st.session_state.city_data:
             # --- pricing ---
@@ -226,7 +268,7 @@ def main():
                 f"Number of rooms in {city}",
                 min_value=1,
                 max_value=10,
-                value=max(1, travelers // 2),
+                value=max(1, travelers // DEFAULT_ROOM_CALCULATION_DIVISOR),
                 key=f"rooms_{city}"
             )
 
@@ -243,7 +285,7 @@ def main():
                     extra_bed_price = st.number_input(
                         f"Extra bed price per night in {city}",
                         min_value=0,
-                        value=1500,
+                        value=DEFAULT_EXTRA_BED_PRICE,
                         step=100,
                         key=f"extra_bed_price_{city}"
                     )
@@ -266,12 +308,14 @@ def main():
             else:
                 st.session_state.price_override.pop(city, None)
 
-            for i, opt in enumerate(options):
-                st.markdown(f"### {labels[i]}")
-                st.write(f"**{opt['hotel_name']}** ({opt['star']}-Star)")
-                st.write(opt["recommendation"])
-                st.write(f"Price per night per person: ₹{opt['price']:,}")
-                st.markdown("---")
+            # FIX: Use expander for better UX
+            with st.expander("📋 View All Hotel Options", expanded=False):
+                for i, opt in enumerate(options):
+                    st.markdown(f"### {labels[i]}")
+                    st.write(f"**{opt['hotel_name']}** ({opt['star']}-Star)")
+                    st.write(opt["recommendation"])
+                    st.write(f"Price per night per person: ₹{opt['price']:,}")
+                    st.markdown("---")
 
             effective_price = st.session_state.price_override.get(city, selected_hotel["price"])
             hotel_name = selected_hotel["hotel_name"]
@@ -337,6 +381,21 @@ def main():
                 """
             )
 
+            # FIX: Store room and car config per city
+            room_config[city] = {
+                "rooms": rooms,
+                "extra_bed": extra_bed,
+                "extra_bed_cost_per_night": extra_bed_price,
+                "extra_bed_total_cost": extra_bed_cost
+            }
+            
+            car_details[city] = {
+                "required": want_car,
+                "car_type": car_type,
+                "price_per_day": car_price_per_day,
+                "total_car_cost": car_cost_total
+            }
+
             multi_city_pricing[city] = {
                 "days": days,
                 "hotel_name": hotel_name,
@@ -346,6 +405,15 @@ def main():
                 "hotel_cost_total": hotel_cost_total,
                 "car_cost_total": car_cost_total,
                 "city_total": city_total,
+                # FIX: Add room and car details for PDF generation
+                "rooms": rooms,
+                "extra_bed": extra_bed,
+                "extra_bed_price": extra_bed_price,
+                "extra_bed_cost": extra_bed_cost,
+                "hotel_cost": hotel_cost,
+                "want_car": want_car,
+                "car_type": car_type,
+                "car_price_per_day": car_price_per_day,
             }
 
             # --- sightseeing ---
@@ -367,7 +435,11 @@ def main():
                 itinerary_list = itinerary_data.get("itinerary", [])
                 all_itineraries[city] = itinerary_list
 
-    st.success("Multi-City Quotation Ready!")
+    # FIX: Clear progress indicators
+    progress_bar.empty()
+    progress_text.empty()
+    
+    st.success("✅ Multi-City Quotation Ready!")
 
     # ------------------------------------------
     # DISPLAY OUTPUT
@@ -431,30 +503,9 @@ def main():
         "pricing": multi_city_pricing,
         "total_cost": total_cost,
         "notes_per_city": city_notes,
-        "room_config": {
-            city: {
-                "rooms": rooms,
-                "extra_bed": extra_bed,
-                "extra_bed_cost_per_night": extra_bed_cost
-            }
-        },
-        "car_details": {
-            city: {
-                "required": want_car,
-                "car_type": car_type,
-                "price_per_day": car_price_per_day,
-                "total_car_cost": car_cost
-            }
-        }
-
+        "room_config": room_config,  # FIX: Use collected data
+        "car_details": car_details   # FIX: Use collected data
     }
-
-    # quotation_no = save_quotation(
-    #     customer_name=customer_name,
-    #     cities=cities,
-    #     total_cost=total_cost,
-    #     quotation_data=travel_plan
-    # )
 
     st.markdown("---")
     st.subheader("✅ Finalize Quotation")
@@ -480,94 +531,62 @@ def main():
             st.rerun()
 
     # ------------------------------------------
-    # PDF GENERATION
+    # PDF GENERATION - PROFESSIONAL STYLE
     # ------------------------------------------
+    
+    # Company branding configuration (customize as needed)
+    company_config = {
+        'name': 'TORNADO INDIA',
+        'tagline': 'A SIGNATURE OF EXCELLENCE',
+        'email': 'info@tornadoindia.in',
+        'website': 'www.tornadoindia.in',
+        'phone': '+91-8416812989 / +919076797409',
+        'watermark': 'TORNADO INDIA'
+    }
+    
+    # Generate professional PDF
+    pdf_bytes = generate_professional_pdf(
+        quotation_data=travel_plan,
+        customer_name=customer_name,
+        quotation_no=st.session_state.quotation_no if st.session_state.finalized else "DRAFT",
+        company_config=company_config
+    )
 
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4)
-    styles = getSampleStyleSheet()
-    story = []
-
-    story.append(Paragraph("Travel Quotation", styles["Heading1"]))
-    story.append(Spacer(1, 12))
-    story.append(Paragraph(f"Total Travelers: {travelers}", styles["Normal"]))
-    story.append(Paragraph(f"Hotel Category: {star}-Star", styles["Normal"]))
-    story.append(Paragraph(f"Grand Total: ₹{total_cost:,}", styles["Heading2"]))
-    story.append(Spacer(1, 12))
-
-    for city in cities:
-        data = multi_city_pricing[city]
-        story.append(Paragraph(f"=== {city} ({data['days']} Days) ===", styles["Heading2"]))
-        story.append(Paragraph(f"Hotel: {data['hotel_name']}", styles["Normal"]))
-        story.append(Paragraph(f"Hotel Total: ₹{data['hotel_cost_total']:,}", styles["Normal"]))
-        story.append(Paragraph(f"Car Total: ₹{data['car_cost_total']:,}", styles["Normal"]))
-        story.append(Paragraph(f"City Total: ₹{data['city_total']:,}", styles["Normal"]))
-        story.append(
-            Paragraph(
-                f"Rooms: {rooms} | Extra Bed: {'Yes' if extra_bed else 'No'}",
-                styles["Normal"]
-            )
-        )
-
-        story.append(
-            Paragraph(
-                f"Hotel Cost: ₹{hotel_cost:,}",
-                styles["Normal"]
-            )
-        )
-        if car_cost > 0:
-            story.append(
-                Paragraph(
-                    f"Car: {car_type} — ₹{car_price_per_day:,} per day × {days} days = ₹{car_cost:,}",
-                    styles["Normal"]
-                )
-            )
-        else:
-            story.append(
-                Paragraph("Car: Not included", styles["Normal"])
-            )
-
-        story.append(Spacer(1, 12))
-
-        if city_notes[city].strip():
-            story.append(Paragraph("Notes:", styles["Heading3"]))
-            for line in city_notes[city].split("\n"):
-                story.append(Paragraph(line, styles["Normal"]))
-            story.append(Spacer(1, 12))
-
-        story.append(Paragraph("Sightseeing:", styles["Heading3"]))
-        for spot in all_sightseeing[city]:
-            story.append(Paragraph(f"{spot['place']}: {spot['description']}", styles["Normal"]))
-        story.append(Spacer(1, 12))
-
-        story.append(Paragraph("Itinerary:", styles["Heading3"]))
-        for day in all_itineraries[city]:
-            story.append(Paragraph(f"Day {day['day']}: {day['title']}", styles["Normal"]))
-            for activity in day["activities"]:
-                story.append(Paragraph(f"- {activity}", styles["Normal"]))
-            story.append(Paragraph(
-                f"Day Cost: ₹{day['day_cost_total']:,}",
-                styles["Normal"]
-            ))
-            story.append(Spacer(1, 12))
-
-    doc.build(story)
-    pdf_bytes = buffer.getvalue()
-    buffer.close()
-
-    file_base = safe_filename(customer_name)
-
+    # ------------------------------------------
+    # PDF DOWNLOAD SECTION
+    # ------------------------------------------
+    st.markdown("---")
+    st.subheader("📥 Download Quotation")
+    
     if st.session_state.finalized:
         file_base = safe_filename(customer_name)
-
-        st.download_button(
-            label="📄 Download PDF Quotation",
-            data=pdf_bytes,
-            file_name=f"{file_base}_{st.session_state.quotation_no}.pdf",
-            mime="application/pdf"
-        )
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.success(f"✅ Quotation {st.session_state.quotation_no} is ready for download!")
+        with col2:
+            st.download_button(
+                label="📄 Download PDF",
+                data=pdf_bytes,
+                file_name=f"{file_base}_{st.session_state.quotation_no}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
     else:
-        st.info("Finalize the quotation to enable PDF download.")
+        # Allow preview download before finalizing
+        st.info("💡 You can preview the PDF before finalizing the quotation.")
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.write("Preview PDF (Draft - not saved to database)")
+        with col2:
+            st.download_button(
+                label="👁️ Preview PDF",
+                data=pdf_bytes,
+                file_name=f"{safe_filename(customer_name)}_DRAFT.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
 
     st.markdown("---")
     st.subheader("📂 Quotation History")
