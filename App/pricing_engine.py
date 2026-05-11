@@ -1,6 +1,12 @@
 import pandas as pd
+import streamlit as st
 
+@st.cache_data(show_spinner=False)
 def load_pricing_data(uploaded_file):
+    """
+    Load and parse pricing data from Excel file.
+    Cached to avoid re-parsing on every interaction.
+    """
     try:
         xls = pd.ExcelFile(uploaded_file)
         sheet_names = xls.sheet_names
@@ -27,19 +33,41 @@ def get_hotel_price(hotels_df, city, star):
 
 
 def get_car_options(car_df):
+    """
+    Extract car rental options from DataFrame.
+    Supports multiple column name formats.
+    """
     car_df = car_df.copy()
     car_df.columns = car_df.columns.str.strip().str.lower()
 
-    required_cols = {"car_type", "price_per_day"}
-    if not required_cols.issubset(set(car_df.columns)):
+    # FIX: Support multiple column name formats
+    # Check for 'car_type' or 'city' column
+    car_type_col = None
+    if 'car_type' in car_df.columns:
+        car_type_col = 'car_type'
+    elif 'city' in car_df.columns:
+        car_type_col = 'city'
+    else:
         raise ValueError(
-            f"CarRental sheet must contain columns: {required_cols}. "
+            f"CarRental sheet must contain 'car_type' or 'city' column. "
+            f"Found: {car_df.columns.tolist()}"
+        )
+    
+    # Check for price column
+    price_col = None
+    if 'price_per_day' in car_df.columns:
+        price_col = 'price_per_day'
+    elif 'price_per_day_per_car' in car_df.columns:
+        price_col = 'price_per_day_per_car'
+    else:
+        raise ValueError(
+            f"CarRental sheet must contain 'price_per_day' or 'price_per_day_per_car' column. "
             f"Found: {car_df.columns.tolist()}"
         )
 
     options = {}
     for _, row in car_df.iterrows():
-        options[row["car_type"]] = row["price_per_day"]
+        options[row[car_type_col]] = row[price_col]
 
     return options
 

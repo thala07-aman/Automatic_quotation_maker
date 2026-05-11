@@ -1,11 +1,11 @@
 import os
 import json
 from typing import Dict, Any, List
-from groq import Groq
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 def generate_itinerary(
@@ -17,43 +17,94 @@ def generate_itinerary(
         cost_per_day_car: float = 0
 ) -> Dict[str, Any]:
     """
-    Generates a structured day-wise itinerary using sightseeing places
-    and applies daily cost labels.
+    Generates a structured day-wise itinerary with detailed activities
+    and specific landmarks for each day.
     """
 
     # format sightseeing places for AI prompt
-    sightseeing_names = ", ".join(item["place"] for item in sightseeing_list)
+    sightseeing_details = "\n".join([
+        f"- {item['place']}: {item['description']}"
+        for item in sightseeing_list
+    ])
 
     prompt = f"""
-You are a travel planner writing a day-by-day itinerary.
-Use ONLY the following sightseeing places: {sightseeing_names}.
-Spread them logically across {days} days.
+You are an experienced travel planner creating a detailed day-by-day itinerary for {city}.
 
-Rules:
-- Each day must have a title
-- Use short activity lines
-- No times, no prices, no random places
-- Professional travel tone
-- Output must be strict JSON only
+Available Attractions:
+{sightseeing_details}
 
-Format:
+Create a {days}-day itinerary following this structure:
+
+Day 1 Guidelines:
+- Start with "Arrival in {city}"
+- Include airport/station transfer
+- Hotel check-in
+- Light sightseeing or rest (depending on arrival time)
+- Evening activity if time permits
+
+Middle Days Guidelines:
+- Full day sightseeing
+- Include 2-3 major attractions per day
+- Add meal breaks (breakfast, lunch, dinner locations)
+- Include travel time between locations
+- Suggest best times to visit (morning/afternoon/evening)
+- Add local experiences (markets, cafes, viewpoints)
+
+Last Day Guidelines:
+- Morning sightseeing if time permits
+- Hotel check-out
+- Departure transfer to airport/station
+- Include buffer time for travel
+
+Important Rules:
+1. Use ONLY the attractions listed above
+2. Be specific about activities (e.g., "Visit Taj Mahal at sunrise for best photos")
+3. Include practical details (check-in, check-out, transfers)
+4. Mention meal times naturally (e.g., "Lunch at local restaurant near Red Fort")
+5. Add time-of-day context (morning, afternoon, evening)
+6. Keep activities realistic and not rushed
+7. Each day should have 4-8 activity items
+8. Professional, informative tone
+9. Output MUST be valid JSON only, no markdown
+
+Required JSON Format:
 {{
   "city": "{city}",
   "itinerary": [
     {{
-      "day": <number>,
-      "title": "<title>",
+      "day": 1,
+      "title": "Arrival in {city}",
       "activities": [
-        "<activity>"
-      ]
+        "Arrival at airport/railway station",
+        "Transfer to hotel",
+        "Check-in and freshen up",
+        "Evening visit to [landmark]",
+        "Dinner at hotel/local restaurant"
+      ],
+      "key_landmark": "[main attraction for this day]"
+    }},
+    {{
+      "day": 2,
+      "title": "[Descriptive title]",
+      "activities": [
+        "Morning: [activity]",
+        "Visit [landmark 1]",
+        "Lunch at [area]",
+        "Afternoon: [landmark 2]",
+        "Evening: [activity]",
+        "Return to hotel"
+      ],
+      "key_landmark": "[main attraction for this day]"
     }}
   ]
 }}
+
+CRITICAL: Include "key_landmark" field for each day with the main attraction to visit that day.
 """
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             response_format={"type": "json_object"}

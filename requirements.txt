@@ -1,6 +1,8 @@
 streamlit
 pandas
 openpyxl
-groq
+openai
 python-dotenv
 reportlab
+Pillow
+requests
