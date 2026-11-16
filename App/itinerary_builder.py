@@ -1,11 +1,7 @@
-import os
 import json
 from typing import Dict, Any, List
-from openai import OpenAI
-from dotenv import load_dotenv
 
-load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+from llm_client import chat
 
 
 def generate_itinerary(
@@ -109,14 +105,11 @@ CRITICAL:
 """
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
+        raw_output = chat(
+            [{"role": "user", "content": prompt}],
             temperature=0,
-            response_format={"type": "json_object"}
+            json_mode=True,
         )
-
-        raw_output = response.choices[0].message.content.strip()
         itinerary_data = json.loads(raw_output)
 
         # VALIDATION: Ensure correct number of days

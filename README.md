@@ -17,10 +17,21 @@ This application streamlines the process of creating professional travel quotati
 - **Price Override**: Manual price adjustment capability for custom negotiations
 
 ### AI-Powered Features
-- **Sightseeing Generation**: AI-curated list of attractions using Groq's Llama 3.3 70B model
+- **Sightseeing Generation**: AI-curated list of attractions (Groq or OpenAI, whichever key is configured)
 - **Itinerary Builder**: Automated day-by-day activity planning
 - **Hotel Recommendations**: AI-generated explanations for hotel choices
 - **Custom Notes**: Per-city recommendations and special instructions
+
+### Route Map & Plan Check
+- **Route map**: cities plotted in order with the road route between them, plus a table of distance and drive time per leg (OpenStreetMap Nominatim + OSRM, no API key needed)
+- **Plan check**: warns about unrealistic plans, shown as internal notes (not in the client PDF):
+  - transfers over 5h (warning) or 8h (error)
+  - days that are too packed (inbound drive + sightseeing stops + meals/overhead over 11h)
+  - a 1-day stay right after a long transfer
+  - long transfers with no car selected
+  - arrival/departure dates that don't match the total days
+- **Caching & fallback**: lookups are cached in SQLite (`geo_cache`, `route_cache`); if the routing service is down, a straight-line estimate is used and marked "estimated"
+- Thresholds are constants at the top of `App/feasibility.py`; the route is saved with each quotation and shown in the dashboard detail view
 
 ### Dashboard
 - **History table**: search by customer / quotation no, filter by city and date
@@ -37,7 +48,7 @@ This application streamlines the process of creating professional travel quotati
 ## 🛠️ Technology Stack
 
 - **Frontend**: Streamlit
-- **AI/LLM**: Groq API (Llama 3.3 70B Versatile)
+- **AI/LLM**: Groq (`openai/gpt-oss-120b`) or OpenAI (`gpt-4o-mini`), both optional; see `App/llm_client.py`
 - **Database**: SQLite
 - **Data Processing**: Pandas
 - **PDF Generation**: ReportLab
@@ -47,7 +58,7 @@ This application streamlines the process of creating professional travel quotati
 
 ### Prerequisites
 - Python 3.8+
-- Groq API Key
+- At least one AI key: Groq API key or OpenAI API key
 
 ### Setup
 
@@ -66,7 +77,15 @@ pip install -r requirements.txt
 
 Create a `.env` file in the project root:
 ```env
+# Set one or both. If GROQ_API_KEY is set, Groq is used first;
+# otherwise (or if a Groq request fails) OpenAI is used.
 GROQ_API_KEY=your_groq_api_key_here
+OPENAI_API_KEY=your_openai_api_key_here
+
+# Optional overrides
+# LLM_PROVIDER=openai            # force the preferred provider (groq | openai)
+# GROQ_MODEL=openai/gpt-oss-120b  # Groq retires models; list yours at https://api.groq.com/openai/v1/models
+# OPENAI_MODEL=gpt-4o-mini
 ```
 
 4. **Run the application**
@@ -232,7 +251,7 @@ Automatic_quotation_maker/
 
 - Single-threaded Streamlit session state
 - Requires manual Excel file upload per session
-- AI responses depend on Groq API availability
+- AI responses depend on the availability of the configured provider (Groq / OpenAI)
 - PDF generation uses basic ReportLab styling
 
 ## 🔮 Future Enhancements
