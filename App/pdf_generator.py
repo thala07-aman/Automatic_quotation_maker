@@ -3,8 +3,9 @@ Professional PDF Generator for Travel Quotations
 Supports custom branding, images, and styled layouts
 """
 
+import os
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.platypus import (
@@ -13,39 +14,154 @@ from reportlab.platypus import (
 )
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
 from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 import io
 from image_fetcher import fetch_city_images
 
 
+PAGE_W, PAGE_H = letter  # 612 x 792 pt, same as the reference PDF
+ORANGE = colors.HexColor('#F79646')   # title / tagline / watermark
+RED = colors.HexColor('#C0504D')      # contact line
+
+# Header geometry (pt from top of page), measured from the reference PDF
+BORDER_INSET = 24          # black page border, 1pt, 24pt from every edge
+TITLE_SIZE = 48            # Georgia Bold
+TITLE_BASELINE_Y = 118
+TAGLINE_RIGHT_X = 530
+TAGLINE_BASELINE_Y = 143.5
+TAGLINE_WIDTH = 135        # width of the tagline text in the reference
+CONTACT_X = 36
+CONTACT_BASELINE_Y = 158
+CONTACT_WIDTH = 356        # width of the contact line in the reference
+RULE_Y = 167               # thick rule under the header
+FIRST_PAGE_BODY_Y = 180    # where "Dear ..." starts on page 1
+TOP_MARGIN = 70
+
+
+def _register_fonts():
+    """Register Georgia Bold / Trebuchet if installed, else fall back to built-ins."""
+    dirs = [
+        '/System/Library/Fonts/Supplemental',
+        '/Library/Fonts',
+        'C:/Windows/Fonts',
+        '/usr/share/fonts/truetype/msttcorefonts',
+    ]
+    wanted = {
+        'Georgia-Bold': ('Georgia Bold.ttf', 'georgiab.ttf', 'Georgia_Bold.ttf'),
+        'Trebuchet': ('Trebuchet MS.ttf', 'trebuc.ttf'),
+        'Trebuchet-Bold': ('Trebuchet MS Bold.ttf', 'trebucbd.ttf'),
+    }
+    found = {}
+    for name, files in wanted.items():
+        for d in dirs:
+            for f in files:
+                path = os.path.join(d, f)
+                if os.path.exists(path):
+                    try:
+                        pdfmetrics.registerFont(TTFont(name, path))
+                        found[name] = name
+                    except Exception:
+                        pass
+                    break
+            if name in found:
+                break
+    return {
+        'title': found.get('Georgia-Bold', 'Times-Bold'),
+        'body': found.get('Trebuchet', 'Helvetica'),
+        'body_bold': found.get('Trebuchet-Bold', 'Helvetica-Bold'),
+    }
+
+
+FONTS = _register_fonts()
+
+
+def _fit_font_size(text, font, target_width):
+    """Font size at which `text` is `target_width` pt wide."""
+    return target_width / pdfmetrics.stringWidth(text, font, 1)
+
+
 class BrandedCanvas(canvas.Canvas):
-    """Custom canvas with watermark and page numbers"""
+    """Custom canvas: page border, first-page header, outline watermark, page numbers.
+
+    The border/header/watermark are drawn by draw_page_background() at the START
+    of each page (so images and text sit on top of the watermark); only the page
+    number is drawn here at the end of the page.
+    """
     
     def __init__(self, *args, **kwargs):
         self.watermark_text = kwargs.pop('watermark_text', None)
+        self.header = kwargs.pop('header', None)
         canvas.Canvas.__init__(self, *args, **kwargs)
+
+    def _draw_border(self):
+        self.setStrokeColor(colors.black)
+        self.setLineWidth(1)
+        self.rect(BORDER_INSET, BORDER_INSET,
+                  PAGE_W - 2 * BORDER_INSET, PAGE_H - 2 * BORDER_INSET)
+
+    def _draw_header(self):
+        h = self.header
+        # Title
+        self.setFillColor(ORANGE)
+        self.setFont(FONTS['title'], TITLE_SIZE)
+        self.drawCentredString(PAGE_W / 2, PAGE_H - TITLE_BASELINE_Y, h['name'])
+        # Tagline (right aligned, under the title)
+        tag_font = 'Helvetica-Bold'
+        self.setFont(tag_font, _fit_font_size(h['tagline'], tag_font, TAGLINE_WIDTH))
+        self.drawRightString(TAGLINE_RIGHT_X, PAGE_H - TAGLINE_BASELINE_Y, h['tagline'])
+        # Contact line
+        contact = f"{h['email']}/{h['website']}/{h['phone']}"
+        self.setFillColor(RED)
+        self.setFont(tag_font, _fit_font_size(contact, tag_font, CONTACT_WIDTH))
+        self.drawString(CONTACT_X, PAGE_H - CONTACT_BASELINE_Y, contact)
+        # Thick rule
+        self.setStrokeColor(colors.black)
+        self.setLineWidth(2)
+        self.line(BORDER_INSET, PAGE_H - RULE_Y, PAGE_W - BORDER_INSET, PAGE_H - RULE_Y)
+
+    def _draw_watermark(self):
+        self.saveState()
+        self.translate(PAGE_W / 2, PAGE_H / 2)
+        self.rotate(42)
+        font = FONTS['title']
+        size = _fit_font_size(self.watermark_text, font, 347)
+        width = pdfmetrics.stringWidth(self.watermark_text, font, size)
+        txt = self.beginText(-width / 2, -size * 0.3)
+        txt.setFont(font, size)
+        txt.setTextRenderMode(1)  # outline only
+        self.setStrokeColor(ORANGE)
+        self.setLineWidth(1)
+        txt.textOut(self.watermark_text)
+        self.drawText(txt)
+        self.restoreState()
         
-    def showPage(self):
-        self.saveState()  # FIX: Correct method name
-        
-        # Add watermark
+    def draw_page_background(self):
+        """Draw everything that must sit BEHIND the page content."""
+        self.saveState()
+        self._draw_border()
+        if self.header and self.getPageNumber() == 1:
+            self._draw_header()
         if self.watermark_text:
-            self.setFont('Helvetica', 60)
-            self.setFillColorRGB(0.9, 0.9, 0.9, alpha=0.3)
-            self.saveState()
-            self.translate(A4[0]/2, A4[1]/2)
-            self.rotate(45)
-            self.drawCentredString(0, 0, self.watermark_text)
-            self.restoreState()
+            self._draw_watermark()
+        self.restoreState()
+
+    def showPage(self):
+        self.saveState()
         
-        # Add page number
-        page_num = self.getPageNumber()
-        text = f"Page {page_num}"
+        # Add page number (inside the border)
         self.setFont('Helvetica', 9)
         self.setFillColorRGB(0.5, 0.5, 0.5)
-        self.drawRightString(A4[0] - 0.75*inch, 0.5*inch, text)
+        self.drawRightString(PAGE_W - BORDER_INSET - 10, BORDER_INSET + 8,
+                             f"Page {self.getPageNumber()}")
         
-        self.restoreState()  # FIX: Correct method name
+        self.restoreState()
         canvas.Canvas.showPage(self)
+
+
+def _draw_background(canv, doc):
+    """Page-start callback: runs before the flowables, so it is drawn underneath them."""
+    canv.draw_page_background()
 
 
 def create_custom_styles():
@@ -157,11 +273,11 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
     # Create document with custom canvas
     doc = SimpleDocTemplate(
         buffer,
-        pagesize=A4,
-        rightMargin=0.75*inch,
-        leftMargin=0.75*inch,
-        topMargin=0.75*inch,
-        bottomMargin=1*inch
+        pagesize=letter,
+        rightMargin=36,
+        leftMargin=36,
+        topMargin=TOP_MARGIN,
+        bottomMargin=50
     )
     
     styles = create_custom_styles()
@@ -169,26 +285,10 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
     
     # ==========================================
     # HEADER SECTION
+    # The title, tagline, contact line and rule are drawn on page 1 by
+    # BrandedCanvas; here we only reserve the vertical space for them.
     # ==========================================
-    
-    # Company Name
-    story.append(Paragraph(company_config['name'], styles['CompanyHeader']))
-    
-    # Tagline
-    story.append(Paragraph(company_config['tagline'], styles['Tagline']))
-    
-    # Contact Info Bar (dark background)
-    contact_text = f"{company_config['email']} / {company_config['website']} / {company_config['phone']}"
-    contact_table = Table([[Paragraph(contact_text, styles['ContactInfo'])]], colWidths=[7*inch])
-    contact_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#2F2F2F')),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 8),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-    ]))
-    story.append(contact_table)
-    story.append(Spacer(1, 20))
+    story.append(Spacer(1, FIRST_PAGE_BODY_Y - TOP_MARGIN))
     
     # ==========================================
     # GREETING & QUOTATION INFO
@@ -443,12 +543,15 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
     story.append(Paragraph(f"<b>{company_config['name']}</b>", styles['Highlight']))
     story.append(Paragraph(company_config['phone'], styles['Normal']))
     
-    # Build PDF with watermark
+    # Build PDF with border, header and watermark
     doc.build(
         story,
+        onFirstPage=_draw_background,
+        onLaterPages=_draw_background,
         canvasmaker=lambda *args, **kwargs: BrandedCanvas(
             *args,
             watermark_text=company_config.get('watermark'),
+            header=company_config,
             **kwargs
         )
     )
