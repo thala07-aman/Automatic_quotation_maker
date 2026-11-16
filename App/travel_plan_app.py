@@ -15,9 +15,10 @@ from pricing_engine import get_car_options
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4
-from database import init_db, save_quotation, get_all_quotations, migrate_schema
+from database import init_db, save_quotation, migrate_schema
 from pdf_generator import generate_professional_pdf
 from image_fetcher import setup_unsplash_api
+from dashboard import render_dashboard
 
 # FIX: Configuration constants
 DEFAULT_EXTRA_BED_PRICE = 1500
@@ -92,6 +93,17 @@ Rules:
         return f"{hotel_name} is a well-rated {star}-star property in {city}. It offers comfortable accommodations suitable for travelers."
 
 
+# Company branding configuration (customize as needed)
+COMPANY_CONFIG = {
+    'name': 'TORNADO INDIA',
+    'tagline': 'A SIGNATURE OF EXCELLENCE',
+    'email': 'info@tornadoindia.in',
+    'website': 'www.tornadoindia.in',
+    'phone': '+918416812989/+919076797409',
+    'watermark': 'TORNADO INDIA'
+}
+
+
 def main():
     st.set_page_config(page_title="Multi-City Travel Builder", layout="wide")
     st.title("🧳 Multi-City Travel Quotation Builder")
@@ -120,6 +132,30 @@ def main():
         st.markdown("---")
         st.caption("💡 Tip: Images are cached for 24 hours to improve performance")
 
+    # Dashboard is rendered first so that st.stop() inside the builder never hides it.
+    dashboard_tab, builder_tab = st.tabs(["📊 Dashboard", "➕ New Quotation"])
+
+    with dashboard_tab:
+        render_dashboard(COMPANY_CONFIG)
+
+    with builder_tab:
+        render_builder()
+
+
+def render_builder():
+    # Values copied from a past quotation via the dashboard "Clone" button (may be empty)
+    prefill = st.session_state.get("clone_prefill") or {}
+
+    if prefill:
+        info_col, clear_col = st.columns([4, 1])
+        info_col.info(
+            f"📋 Cloned from {prefill['source_no']}. Details are pre-filled; "
+            "upload the pricing Excel, adjust anything, and generate."
+        )
+        if clear_col.button("✖ Discard clone"):
+            del st.session_state["clone_prefill"]
+            st.rerun()
+
     # ------------------------------------------
     # UPLOAD PRICING EXCEL
     # ------------------------------------------
@@ -140,6 +176,7 @@ def main():
     # ------------------------------------------
     customer_name = st.text_input(
         "Customer Name",
+        value=prefill.get("customer_name", ""),
         placeholder="Enter customer name"
     )
 
@@ -171,9 +208,16 @@ def main():
 
     unique_cities = sorted(hotels_df["City"].unique().tolist())
 
+    prefill_cities = [c for c in prefill.get("cities", []) if c in unique_cities]
+    missing_cities = [c for c in prefill.get("cities", []) if c not in unique_cities]
+    if missing_cities:
+        st.warning(f"Not in the uploaded Excel, skipped: {', '.join(missing_cities)}")
+        prefill_cities = []  # day counts would no longer line up
+
     cities = st.multiselect(
         "Select Cities (in order)",
         options=unique_cities,
+        default=prefill_cities,
         help="Example: Delhi → Agra → Jaipur"
     )
 
@@ -187,6 +231,7 @@ def main():
 
     days_input = st.text_input(
         "Enter comma-separated days per city",
+        value=",".join(str(d) for d in prefill.get("days_per_city", [])) if prefill_cities else "",
         placeholder="Example: 2,1,3"
     )
 
@@ -207,9 +252,27 @@ def main():
     # ------------------------------------------
     # OTHER INPUTS
     # ------------------------------------------
-    travelers = st.number_input("Travelers", min_value=1, max_value=50, value=2, help="Number of people traveling")
-    star = st.selectbox("Hotel Category", options=[2, 3, 4, 5], index=2)
-    max_places = st.number_input("Sightseeing places per city", min_value=1, max_value=20, value=6)
+    travelers = st.number_input(
+        "Travelers", min_value=1, max_value=50,
+        value=min(50, max(1, int(prefill.get("travelers", 2)))),
+        help="Number of people traveling"
+    )
+    st.markdown("**Hotel Category (per city)**")
+    city_stars = {}
+    star_cols = st.columns(min(len(cities), 4))
+    for i, city in enumerate(cities):
+        with star_cols[i % len(star_cols)]:
+            city_stars[city] = st.selectbox(
+                f"{city}",
+                options=[2, 3, 4, 5],
+                index=[2, 3, 4, 5].index(prefill.get("stars", {}).get(city, 4)),
+                format_func=lambda s: f"{s}-Star",
+                key=f"star_{city}"
+            )
+    max_places = st.number_input(
+        "Sightseeing places per city", min_value=1, max_value=20,
+        value=prefill.get("max_places", 6)
+    )
 
     # ------------------------------------------
     # NOTES PER CITY (NEW FEATURE)
@@ -220,6 +283,7 @@ def main():
     for city in cities:
         note = st.text_area(
             f"Notes for {city}",
+            value=prefill.get("notes", {}).get(city, ""),
             placeholder=f"Enter recommendations for {city}…"
         )
         city_notes[city] = note
@@ -254,6 +318,8 @@ def main():
         progress_text.text(f"Processing {city}... ({idx + 1}/{len(cities)})")
         progress_bar.progress((idx + 1) / len(cities))
 
+        star = city_stars[city]
+
         if city not in st.session_state.city_data:
             # --- pricing ---
             city_hotels = hotels_df[
@@ -286,18 +352,21 @@ def main():
                 f"Choose hotel for {city}",
                 range(len(options)),
                 format_func=lambda i: labels[i],
-                key=f"hotel_option_{city}"
+                key=f"hotel_option_{city}_{star}"
             )
             st.session_state.selected_option[city] = selected_index
             selected_hotel = options[selected_index]
 
             st.subheader("🛏️ Room Configuration")
 
+            prefill_room = prefill.get("rooms", {}).get(city, {})
+            prefill_car = prefill.get("cars", {}).get(city, {})
+
             rooms = st.number_input(
                 f"Number of rooms in {city}",
                 min_value=1,
                 max_value=10,
-                value=max(1, travelers // DEFAULT_ROOM_CALCULATION_DIVISOR),
+                value=min(10, max(1, int(prefill_room.get("rooms") or travelers // DEFAULT_ROOM_CALCULATION_DIVISOR))),
                 key=f"rooms_{city}"
             )
 
@@ -307,6 +376,7 @@ def main():
             if travelers > (rooms * 2):
                 extra_bed = st.checkbox(
                     f"Add extra bed in {city}",
+                    value=bool(prefill_room.get("extra_bed", False)),
                     key=f"extra_bed_{city}"
                 )
 
@@ -314,7 +384,7 @@ def main():
                     extra_bed_price = st.number_input(
                         f"Extra bed price per night in {city}",
                         min_value=0,
-                        value=DEFAULT_EXTRA_BED_PRICE,
+                        value=int(prefill_room.get("extra_bed_cost_per_night") or DEFAULT_EXTRA_BED_PRICE),
                         step=100,
                         key=f"extra_bed_price_{city}"
                     )
@@ -328,7 +398,7 @@ def main():
                 min_value=0,
                 value=int(base_price),
                 step=100,
-                key=f"override_{city}"
+                key=f"override_{city}_{star}"
             )
 
             # Save override only if changed
@@ -367,6 +437,7 @@ def main():
 
             want_car = st.checkbox(
                 f"Do you want a car in {city}?",
+                value=bool(prefill_car.get("required", False)),
                 key=f"want_car_{city}"
             )
 
@@ -377,9 +448,12 @@ def main():
             if want_car:
                 car_options = get_car_options(car_df)
 
+                car_choices = list(car_options.keys())
+                prefill_car_type = prefill_car.get("car_type")
                 car_type = st.radio(
                     f"Select car type for {city}",
-                    options=list(car_options.keys()),
+                    options=car_choices,
+                    index=car_choices.index(prefill_car_type) if prefill_car_type in car_choices else 0,
                     key=f"car_type_{city}"
                 )
 
@@ -477,7 +551,7 @@ def main():
     for city in cities:
         data = multi_city_pricing[city]
         st.write(f"### {city} — {data['days']} Days")
-        st.write(f"Hotel: {data['hotel_name']} ({star}-Star)")
+        st.write(f"Hotel: {data['hotel_name']} ({city_stars[city]}-Star)")
         st.write(f"Hotel Total: ₹{data['hotel_cost_total']:,}")
         st.write(f"Car Total: ₹{data['car_cost_total']:,}")
         st.write(f"City Total: ₹{data['city_total']:,}")
@@ -526,7 +600,7 @@ def main():
         "cities": cities,
         "days_per_city": days_per_city,
         "travelers": travelers,
-        "hotel_star": star,
+        "hotel_stars": city_stars,
         "sightseeing": all_sightseeing,
         "itinerary": all_itineraries,
         "pricing": multi_city_pricing,
@@ -565,16 +639,8 @@ def main():
     # PDF GENERATION - PROFESSIONAL STYLE
     # ------------------------------------------
     
-    # Company branding configuration (customize as needed)
-    company_config = {
-        'name': 'TORNADO INDIA',
-        'tagline': 'A SIGNATURE OF EXCELLENCE',
-        'email': 'info@tornadoindia.in',
-        'website': 'www.tornadoindia.in',
-        'phone': '+918416812989/+919076797409',
-        'watermark': 'TORNADO INDIA'
-    }
-    
+    company_config = COMPANY_CONFIG
+
     # The PDF can take minutes to build (image lookup/generation), so it is only
     # built when requested and kept in session_state until the inputs change.
     pdf_quotation_no = st.session_state.quotation_no if st.session_state.finalized else "DRAFT"
@@ -634,18 +700,7 @@ def main():
                 use_container_width=True
             )
 
-    st.markdown("---")
-    st.subheader("📂 Quotation History")
-
-    rows = get_all_quotations()
-
-    if not rows:
-        st.info("No quotations saved yet.")
-    else:
-        for q in rows:
-            st.write(
-                f"🧾 {q[0]} | 👤 {q[1]} | 📍 {q[2]} | 💰 ₹{q[3]:,} | 🕒 {q[4]}"
-            )
+    st.caption("📂 Full quotation history is available in the 📊 Dashboard tab.")
 
 
 if __name__ == "__main__":

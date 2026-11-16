@@ -22,6 +22,13 @@ This application streamlines the process of creating professional travel quotati
 - **Hotel Recommendations**: AI-generated explanations for hotel choices
 - **Custom Notes**: Per-city recommendations and special instructions
 
+### Dashboard
+- **History table**: search by customer / quotation no, filter by city and date
+- **KPIs & insights**: total quotations, value quoted, average quote, most quoted cities, quotes per month
+- **Quotation detail**: city-wise pricing, itinerary, JSON download, on-demand PDF rebuild
+- **Clone**: copy a past quotation into the builder (customer, cities, days, stars, rooms, cars, notes) and re-price it with the current Excel
+- **Roadmap**: upcoming dashboard features live in `FUTURE_FEATURES` in `App/dashboard.py`
+
 ### Output & Storage
 - **PDF Generation**: Professional quotation documents with complete trip details
 - **Database Storage**: SQLite-based quotation history with unique quotation numbers
