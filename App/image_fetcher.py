@@ -1,18 +1,32 @@
 """
 Image Fetcher for Travel Destinations
-Fetches royalty-free images from Unsplash API
+Fetches images from Unsplash / Pexels (if API keys are set), then Wikipedia
+(free, no key), optionally falling back to OpenAI image generation.
 """
 
 import requests
 import io
 from PIL import Image
 import os
+import time
 from typing import Optional, Dict
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Image API configuration
-# UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "")
-# UNSPLASH_API_URL = "https://api.unsplash.com/search/photos"
+UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "")
+UNSPLASH_API_URL = "https://api.unsplash.com/search/photos"
+
+WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
+# Wikimedia requires a descriptive User-Agent
+WIKIPEDIA_HEADERS = {"User-Agent": "TornadoIndiaQuotationMaker/1.0 (travel quotation PDFs)"}
+
+# OpenAI image generation is a paid fallback, so it is opt-in:
+# set OPENAI_IMAGE_FALLBACK=true in .env to enable it.
+OPENAI_IMAGE_FALLBACK = os.getenv("OPENAI_IMAGE_FALLBACK", "").lower() in ("1", "true", "yes")
+OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1-mini")
 
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
 PEXELS_API_URL = "https://api.pexels.com/v1/search"
@@ -41,12 +55,25 @@ def fetch_destination_image(city: str, landmark: str = None) -> Optional[bytes]:
         query = f"{city} travel destination"
     
     try:
-        # Try Pexels first (better for landmarks), then Unsplash
+        # Try Unsplash first, then Pexels
+        if UNSPLASH_ACCESS_KEY:
+            img = fetch_from_unsplash(query)
+            if img:
+                return img
+        
         if PEXELS_API_KEY:
             img = fetch_from_pexels(query)
             if img:
                 return img
         
+        img = fetch_from_wikipedia(landmark, city)
+        if img:
+            return img
+        
+        if OPENAI_IMAGE_FALLBACK and os.getenv("OPENAI_API_KEY"):
+            img = fetch_from_openai(landmark, city)
+            if img:
+                return img
         
         # Fallback to placeholder
         return fetch_placeholder_image(city, landmark)
@@ -54,6 +81,140 @@ def fetch_destination_image(city: str, landmark: str = None) -> Optional[bytes]:
     except Exception as e:
         print(f"Error fetching image for {query}: {e}")
         return fetch_placeholder_image(city, landmark)
+
+
+def fetch_from_unsplash(query: str) -> Optional[bytes]:
+    """Fetch image from Unsplash API"""
+    
+    headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
+    params = {"query": query, "per_page": 1, "orientation": "landscape"}
+    
+    try:
+        response = requests.get(UNSPLASH_API_URL, headers=headers, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            results = response.json().get("results")
+            if results:
+                # 'regular' is ~1080px wide, plenty for the PDF
+                img_response = requests.get(results[0]["urls"]["regular"], timeout=10)
+                if img_response.status_code == 200:
+                    return img_response.content
+        else:
+            print(f"Unsplash API returned {response.status_code}: {response.text[:200]}")
+    except Exception as e:
+        print(f"Unsplash API error: {e}")
+    
+    return None
+
+
+_last_wikimedia_call = 0.0
+WIKIMEDIA_MIN_INTERVAL = 1.0  # seconds between requests; Wikimedia returns 429 on bursts
+
+
+def _wikimedia_get(url: str, params: dict = None, attempts: int = 4) -> Optional[requests.Response]:
+    """GET from Wikimedia, spaced out and retried with backoff when throttled (429) or on 5xx."""
+    global _last_wikimedia_call
+    for attempt in range(attempts):
+        wait_for = WIKIMEDIA_MIN_INTERVAL - (time.time() - _last_wikimedia_call)
+        if wait_for > 0:
+            time.sleep(wait_for)
+        _last_wikimedia_call = time.time()
+        try:
+            response = requests.get(url, params=params, headers=WIKIPEDIA_HEADERS, timeout=10)
+        except Exception as e:
+            print(f"Wikimedia request error: {e}")
+            response = None
+        if response is not None and response.status_code == 200:
+            return response
+        if response is not None and response.status_code not in (429, 500, 502, 503, 504):
+            print(f"Wikimedia returned {response.status_code} for {url[:80]}")
+            return None
+        if attempt < attempts - 1:
+            wait = float(response.headers.get("Retry-After", 0)) if response is not None else 0
+            time.sleep(min(max(wait, 1.5 * (attempt + 1)), 5))
+    print(f"Wikimedia request failed after {attempts} attempts: {url[:80]}")
+    return None
+
+
+def fetch_from_wikipedia(landmark: Optional[str], city: str) -> Optional[bytes]:
+    """Fetch the lead image of the best-matching Wikipedia article (free, no API key).
+    
+    For a landmark, the article title must share a word with the landmark name
+    (so "Banana Boat" doesn't return an unrelated festival), and low-resolution
+    thumbnails are skipped. Returns None if nothing suitable is found, so the
+    next fallback can run.
+    """
+    
+    if landmark:
+        searches = [f"{landmark} {city}", landmark]
+        city_words = {w.lower() for w in city.split()}
+        keywords = {w.lower().strip(".,'") for w in landmark.split() if len(w) > 2} - city_words
+    else:
+        searches = [city]
+        keywords = set()
+    
+    for term in searches:
+        try:
+            params = {
+                "action": "query", "format": "json", "generator": "search",
+                "gsrsearch": term, "gsrlimit": 5,
+                "prop": "pageimages", "piprop": "thumbnail", "pithumbsize": 1000,
+            }
+            response = _wikimedia_get(WIKIPEDIA_API_URL, params)
+            if response is None:
+                continue
+            
+            pages = response.json().get("query", {}).get("pages", {})
+            # Best search matches first; skip pages without a photo
+            for page in sorted(pages.values(), key=lambda p: p.get("index", 99)):
+                thumbnail = page.get("thumbnail", {})
+                thumb = thumbnail.get("source")
+                if not thumb or thumb.lower().endswith(".svg") or thumbnail.get("width", 0) < 500:
+                    continue
+                title_words = [w.lower().strip(".,'()") for w in page["title"].split()]
+                # exact word, or same 5-letter prefix for long words (spelling variants)
+                if keywords and not any(
+                    k == t or (len(k) >= 6 and len(t) >= 6 and k[:5] == t[:5])
+                    for k in keywords for t in title_words
+                ):
+                    continue
+                img_response = _wikimedia_get(thumb)
+                if img_response is not None:
+                    return img_response.content
+        except Exception as e:
+            print(f"Wikipedia API error for '{term}': {e}")
+    
+    return None
+
+
+def fetch_from_openai(landmark: Optional[str], city: str) -> Optional[bytes]:
+    """Generate a travel photo with the OpenAI Images API (paid, slow)."""
+    import base64
+    from openai import OpenAI
+    
+    subject = f"{landmark}, {city}" if landmark else city
+    prompt = (
+        f"A realistic, high-quality travel photograph of {subject}. "
+        "Natural lighting, landscape orientation, no text, no watermarks, no people close-up."
+    )
+    
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        result = client.images.generate(
+            model=OPENAI_IMAGE_MODEL, prompt=prompt, n=1, size="1536x1024"
+        )
+        item = result.data[0]
+        # Depending on the model the API returns base64 data or a temporary URL
+        if getattr(item, "b64_json", None):
+            return base64.b64decode(item.b64_json)
+        if getattr(item, "url", None):
+            resp = requests.get(item.url, timeout=30)
+            if resp.status_code == 200:
+                return resp.content
+    except Exception as e:
+        print(f"OpenAI image error: {e}")
+    
+    return None
 
 
 def fetch_from_pexels(query: str) -> Optional[bytes]:
@@ -246,7 +407,7 @@ def setup_unsplash_api():
     **Benefits:**
     - Pexels: Excellent landmark and travel photos, easier setup
     - Unsplash: High-quality artistic photos
-    - Use both for better coverage (Pexels tried first)
+    - Use both for better coverage (Unsplash tried first, then Pexels)
     
     3. Restart the application
     

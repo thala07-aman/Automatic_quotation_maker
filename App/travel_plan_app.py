@@ -1,4 +1,6 @@
 import os
+import json
+import hashlib
 
 import streamlit as st
 import io
@@ -569,25 +571,40 @@ def main():
         'tagline': 'A SIGNATURE OF EXCELLENCE',
         'email': 'info@tornadoindia.in',
         'website': 'www.tornadoindia.in',
-        'phone': '+91-8416812989 / +919076797409',
+        'phone': '+918416812989/+919076797409',
         'watermark': 'TORNADO INDIA'
     }
     
-    # Generate professional PDF
-    pdf_bytes = generate_professional_pdf(
-        quotation_data=travel_plan,
-        customer_name=customer_name,
-        quotation_no=st.session_state.quotation_no if st.session_state.finalized else "DRAFT",
-        company_config=company_config
-    )
+    # The PDF can take minutes to build (image lookup/generation), so it is only
+    # built when requested and kept in session_state until the inputs change.
+    pdf_quotation_no = st.session_state.quotation_no if st.session_state.finalized else "DRAFT"
+    pdf_signature = hashlib.md5(
+        json.dumps([travel_plan, customer_name, pdf_quotation_no], sort_keys=True, default=str).encode()
+    ).hexdigest()
 
     # ------------------------------------------
     # PDF DOWNLOAD SECTION
     # ------------------------------------------
     st.markdown("---")
     st.subheader("📥 Download Quotation")
-    
-    if st.session_state.finalized:
+
+    if st.session_state.get("pdf_signature") != pdf_signature:
+        st.info("Click below to build the PDF. Fetching images can take a while the first time.")
+        if st.button("⚙️ Generate PDF"):
+            with st.spinner("Building PDF and fetching images..."):
+                st.session_state.pdf_bytes = generate_professional_pdf(
+                    quotation_data=travel_plan,
+                    customer_name=customer_name,
+                    quotation_no=pdf_quotation_no,
+                    company_config=company_config
+                )
+                st.session_state.pdf_signature = pdf_signature
+
+    pdf_bytes = st.session_state.get("pdf_bytes") if st.session_state.get("pdf_signature") == pdf_signature else None
+
+    if pdf_bytes is None:
+        pass
+    elif st.session_state.finalized:
         file_base = safe_filename(customer_name)
         
         col1, col2 = st.columns([3, 1])
