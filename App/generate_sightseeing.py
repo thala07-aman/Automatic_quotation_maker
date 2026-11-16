@@ -1,12 +1,7 @@
-import os
 import json
 from typing import Dict, Any
-from openai import OpenAI
-from dotenv import load_dotenv
 
-load_dotenv()
-
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+from llm_client import chat
 
 
 def generate_sightseeing(note: str ,city: str, days: int = 3, max_places: int = 6, ) -> Dict[str, Any]:
@@ -48,14 +43,11 @@ Rules:
 
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
+        raw_output = chat(
+            [{"role": "user", "content": prompt}],
             temperature=0,
-            response_format={"type": "json_object"}
+            json_mode=True,
         )
-
-        raw_output = response.choices[0].message.content.strip()
 
         data = json.loads(raw_output)
 
@@ -66,5 +58,5 @@ Rules:
         return {"raw_output": raw_output if 'raw_output' in locals() else ""}
 
     except Exception as e:
-        print("⚠️ OpenAI request failed:", str(e))
+        print("⚠️ LLM request failed:", str(e))
         return {"error": str(e)}

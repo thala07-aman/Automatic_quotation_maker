@@ -1,11 +1,12 @@
 import os
+import copy
 import json
 import hashlib
 
 import streamlit as st
 import io
 import re
-from openai import OpenAI
+from llm_client import chat, active_provider
 
 from generate_sightseeing import generate_sightseeing
 from itinerary_builder import generate_itinerary
@@ -19,6 +20,8 @@ from database import init_db, save_quotation, migrate_schema
 from pdf_generator import generate_professional_pdf
 from image_fetcher import setup_unsplash_api
 from dashboard import render_dashboard
+from route_planner import build_route, render_route, render_flags
+from feasibility import check_plan
 
 # FIX: Configuration constants
 DEFAULT_EXTRA_BED_PRICE = 1500
@@ -27,9 +30,6 @@ AI_CACHE_TTL = 3600  # 1 hour
 
 init_db()
 migrate_schema()
-
-# Initialize OpenAI client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ===============================
 # SESSION STATE
@@ -51,6 +51,21 @@ if "finalized" not in st.session_state:
 
 if "quotation_no" not in st.session_state:
     st.session_state.quotation_no = None
+
+
+def cached_ai(key, fn, is_ok):
+    """
+    Run an AI call once per input and reuse the result across Streamlit reruns, so the
+    quotation text stays stable (and the built PDF stays valid) while the agent edits prices.
+    Failed / empty results are not cached, so they are retried on the next run.
+    """
+    cache = st.session_state.setdefault("ai_cache", {})
+    if key not in cache:
+        result = fn()
+        if not is_ok(result):
+            return result
+        cache[key] = result
+    return cache[key]
 
 
 def safe_filename(name: str) -> str:
@@ -82,13 +97,8 @@ Rules:
 """
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
+        return chat([{"role": "user", "content": prompt}], temperature=0.3)
+    except Exception:
         # Fallback if AI fails
         return f"{hotel_name} is a well-rated {star}-star property in {city}. It offers comfortable accommodations suitable for travelers."
 
@@ -113,6 +123,13 @@ def main():
     # ------------------------------------------
     with st.sidebar:
         st.header("⚙️ Settings")
+
+        provider = active_provider()
+        if provider:
+            st.success(f"✅ AI provider: {'Groq' if provider == 'groq' else 'OpenAI'}")
+        else:
+            st.error("❌ No AI key found. Set GROQ_API_KEY or OPENAI_API_KEY in .env")
+
         
         # Check if image APIs are configured
         pexels_key = os.getenv("PEXELS_API_KEY", "")
@@ -250,6 +267,28 @@ def render_builder():
         return
 
     # ------------------------------------------
+    # ROUTE PREVIEW + EARLY FEASIBILITY CHECKS
+    # ------------------------------------------
+    # Cached per city order so reruns (every widget click) don't hit the network again.
+    route_key = tuple(cities)
+    if st.session_state.get("route_key") != route_key:
+        with st.spinner("Finding route between cities..."):
+            st.session_state.route = build_route(cities)
+        st.session_state.route_key = route_key
+    route = st.session_state.route
+
+    with st.expander("🗺️ Route map & travel times", expanded=len(cities) > 1):
+        render_route(route)
+
+    render_flags(check_plan(
+        cities,
+        days_per_city=days_per_city,
+        legs=route["legs"],
+        arrival_date=arrival_date,
+        departure_date=departure_date,
+    ))
+
+    # ------------------------------------------
     # OTHER INPUTS
     # ------------------------------------------
     travelers = st.number_input(
@@ -293,6 +332,7 @@ def render_builder():
     # ------------------------------------------
     if st.button("Generate Travel Quotation"):
         st.session_state.generated = True
+        st.session_state.pop("ai_cache", None)  # regenerate sightseeing / itinerary text on request
         st.session_state.hotel_options = None
         st.session_state.sightseeing = None
         st.session_state.itinerary = None
@@ -519,23 +559,36 @@ def render_builder():
                 "car_price_per_day": car_price_per_day,
             }
 
-            # --- sightseeing ---
+            # --- sightseeing (cached per input so reruns don't rewrite the text) ---
             with st.spinner(f"Sightseeing → {city}"):
-                sightseeing_data = generate_sightseeing(city_notes[city] , city, days, max_places, )
+                sightseeing_data = cached_ai(
+                    ("sightseeing", city, days, max_places, city_notes[city]),
+                    lambda: generate_sightseeing(city_notes[city], city, days, max_places),
+                    is_ok=lambda r: bool(r.get("sightseeing")),
+                )
                 sightseeing_list = sightseeing_data.get("sightseeing", [])
                 all_sightseeing[city] = sightseeing_list
 
-            # --- itinerary ---
+            # --- itinerary (text cached; costs are re-applied so price edits don't regenerate it) ---
             with st.spinner(f"Itinerary → {city}"):
-                itinerary_data = generate_itinerary(
-                    city=city,
-                    days=days,
-                    sightseeing_list=sightseeing_list,
-                    cost_per_day_total=cost_per_day_total,
-                    cost_per_day_hotel=cost_per_day_hotel,
-                    cost_per_day_car=cost_per_day_car
+                places_key = tuple(s.get("place") for s in sightseeing_list)
+                itinerary_data = cached_ai(
+                    ("itinerary", city, days, places_key),
+                    lambda: generate_itinerary(
+                        city=city,
+                        days=days,
+                        sightseeing_list=sightseeing_list,
+                        cost_per_day_total=cost_per_day_total,
+                        cost_per_day_hotel=cost_per_day_hotel,
+                        cost_per_day_car=cost_per_day_car
+                    ),
+                    is_ok=lambda r: bool(r.get("itinerary")),
                 )
-                itinerary_list = itinerary_data.get("itinerary", [])
+                itinerary_list = copy.deepcopy(itinerary_data.get("itinerary", []))
+                for day in itinerary_list:
+                    day["day_cost_total"] = round(cost_per_day_total, 2)
+                    day["hotel_cost"] = round(cost_per_day_hotel, 2)
+                    day["car_cost"] = round(cost_per_day_car, 2)
                 all_itineraries[city] = itinerary_list
 
     # FIX: Clear progress indicators
@@ -594,6 +647,23 @@ def render_builder():
             day_counter += 1
 
     # ------------------------------------------
+    # FEASIBILITY CHECKS (full plan: route + itinerary + cars + dates)
+    # ------------------------------------------
+    plan_flags = check_plan(
+        cities,
+        days_per_city=days_per_city,
+        legs=route["legs"],
+        itinerary=all_itineraries,
+        car_details=car_details,
+        arrival_date=arrival_date,
+        departure_date=departure_date,
+    )
+    if plan_flags:
+        st.subheader("🧭 Plan Check")
+        st.caption("Internal notes for the agent, not included in the client PDF. You can still proceed.")
+        render_flags(plan_flags)
+
+    # ------------------------------------------
     # TRAVEL PLAN JSON
     # ------------------------------------------
     travel_plan = {
@@ -609,7 +679,9 @@ def render_builder():
         "room_config": room_config,  # FIX: Use collected data
         "car_details": car_details,   # FIX: Use collected data
         "arrival_date": arrival_date.strftime("%d %B %Y"),  # Format: 15 January 2026
-        "departure_date": departure_date.strftime("%d %B %Y")
+        "departure_date": departure_date.strftime("%d %B %Y"),
+        "route": route,
+        "plan_flags": plan_flags,
     }
 
     st.markdown("---")
@@ -626,8 +698,13 @@ def render_builder():
 
             st.session_state.quotation_no = quotation_no
             st.session_state.finalized = True
-
-            st.success(f"Quotation finalized successfully: {quotation_no}")
+            # The dashboard tab is drawn before this button runs, so rerun to refresh it.
+            st.rerun()
+    else:
+        st.success(
+            f"Quotation finalized successfully: {st.session_state.quotation_no}. "
+            "It now appears in the 📊 Dashboard tab."
+        )
 
     if st.session_state.finalized:
         if st.button("🔄 Create New Quotation"):
@@ -655,7 +732,13 @@ def render_builder():
     st.subheader("📥 Download Quotation")
 
     if st.session_state.get("pdf_signature") != pdf_signature:
-        st.info("Click below to build the PDF. Fetching images can take a while the first time.")
+        if st.session_state.finalized:
+            st.info(
+                f"Click below to build the final PDF with quotation number "
+                f"{st.session_state.quotation_no}. Fetching images can take a while the first time."
+            )
+        else:
+            st.info("Click below to build a preview PDF. Fetching images can take a while the first time.")
         if st.button("⚙️ Generate PDF"):
             with st.spinner("Building PDF and fetching images..."):
                 st.session_state.pdf_bytes = generate_professional_pdf(
@@ -686,7 +769,10 @@ def render_builder():
             )
     else:
         # Allow preview download before finalizing
-        st.info("💡 You can preview the PDF before finalizing the quotation.")
+        st.info(
+            "💡 This is a draft preview. Click **Generate Final Quotation** above to save it "
+            "and get the numbered **Download PDF**."
+        )
         
         col1, col2 = st.columns([3, 1])
         with col1:

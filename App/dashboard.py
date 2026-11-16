@@ -13,12 +13,20 @@ import pandas as pd
 import streamlit as st
 
 from database import get_all_quotations_full, get_quotation, delete_quotation
+from route_planner import render_route, render_flags
 from pdf_generator import generate_professional_pdf
 
 STAR_OPTIONS = [2, 3, 4, 5]
 
 # Roadmap shown at the bottom of the dashboard. Edit freely.
 FUTURE_FEATURES = [
+    {
+        "name": "Map & route view",
+        "description": "Route map, drive times and plan-feasibility warnings. Live in the builder and "
+                       "quotation detail. Next: per-landmark distances and a static map in the PDF.",
+        "status": "Live (phase 1)",
+        "effort": "Medium",
+    },
     {
         "name": "Quote status tracking",
         "description": "Draft / Sent / Accepted / Rejected / Expired per quotation, with a validity date "
@@ -233,6 +241,17 @@ def _render_detail(record, company_config):
             for city, p in pricing.items()
         ]
         st.dataframe(pd.DataFrame(city_rows), hide_index=True, use_container_width=True)
+
+    route = data.get("route")
+    if route and (route.get("cities") or route.get("legs")):
+        with st.expander("🗺️ Route map & travel times"):
+            render_route(route)
+
+    saved_flags = data.get("plan_flags") or []
+    if saved_flags:
+        with st.expander(f"🧭 Plan check ({len(saved_flags)} note(s))"):
+            render_flags(saved_flags)
+
 
     with st.expander("📅 Itinerary & sightseeing"):
         for city in data.get("cities", []):
