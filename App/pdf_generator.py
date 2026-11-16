@@ -228,8 +228,8 @@ def create_custom_styles():
         name='DayHeader',
         parent=styles['Heading3'],
         fontSize=12,
-        textColor=colors.white,
-        backColor=colors.HexColor('#4A4A4A'),
+        textColor=colors.black,
+        backColor=colors.HexColor('#FFD700'),
         fontName='Helvetica-Bold',
         borderPadding=5
     ))
@@ -318,6 +318,15 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
     travelers = quotation_data['travelers']
     cities_str = " - ".join(quotation_data['cities'])
     
+    # Hotel star rating per city (older quotations only have a single 'hotel_star')
+    hotel_stars = quotation_data.get('hotel_stars') or {
+        c: quotation_data.get('hotel_star') for c in quotation_data['cities']
+    }
+    if len(set(hotel_stars.values())) == 1:
+        star_summary = f"{next(iter(hotel_stars.values()))}-Star"
+    else:
+        star_summary = ", ".join(f"{c}: {hotel_stars[c]}-Star" for c in quotation_data['cities'])
+    
     story.append(Paragraph(
         f"<b>Package Cost INR {total_cost:,}/- Per Person</b> (Min {travelers} Paying Pax Traveling together)",
         styles['Highlight']
@@ -336,7 +345,7 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
         [Paragraph('<b>Arrival Date</b>', styles['Normal']), Paragraph(quotation_data.get('arrival_date', 'Not specified'), styles['Normal'])],
         [Paragraph('<b>Departure Date</b>', styles['Normal']), Paragraph(quotation_data.get('departure_date', 'Not specified'), styles['Normal'])],
         [Paragraph('<b>Travelers</b>', styles['Normal']), Paragraph(str(travelers), styles['Normal'])],
-        [Paragraph('<b>Hotel Category</b>', styles['Normal']), Paragraph(f"{quotation_data['hotel_star']}-Star", styles['Normal'])],
+        [Paragraph('<b>Hotel Category</b>', styles['Normal']), Paragraph(star_summary, styles['Normal'])],
     ]
     
     summary_table = Table(summary_data, colWidths=[2*inch, 5*inch])
@@ -362,7 +371,7 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
         pricing = quotation_data['pricing'][city]
         room_cfg = quotation_data['room_config'][city]
         
-        hotel_info = f"<b>{pricing['days']} Nights {city}</b> stay at Hotel <b>{pricing['hotel_name']}</b>"
+        hotel_info = f"<b>{pricing['days']} Nights {city}</b> stay at Hotel <b>{pricing['hotel_name']}</b> ({hotel_stars[city]}-Star)"
         story.append(Paragraph(hotel_info, styles['Normal']))
         
         room_info = f"Room Configuration: {room_cfg['rooms']} Room(s)"

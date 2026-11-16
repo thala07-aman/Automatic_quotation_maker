@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import json
 from datetime import datetime
@@ -29,7 +30,8 @@ def make_json_safe(obj):
 
 
 
-DB_NAME = "quotations.db"
+# Always use App/quotations.db, regardless of the directory the app is launched from.
+DB_NAME = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quotations.db")
 
 
 def get_connection():
@@ -111,6 +113,68 @@ def get_all_quotations():
     rows = cur.fetchall()
     conn.close()
     return rows
+
+def _row_to_record(row):
+    quotation_no, customer_name, cities, total_cost, created_at, quotation_json = row
+    try:
+        data = json.loads(quotation_json) if quotation_json else {}
+    except (TypeError, ValueError):
+        data = {}
+    return {
+        "quotation_no": quotation_no,
+        "customer_name": customer_name,
+        "cities": cities,
+        "total_cost": total_cost,
+        "created_at": created_at,
+        "data": data,
+    }
+
+
+def get_all_quotations_full():
+    """All quotations (newest first) as dicts, with the stored JSON parsed into `data`."""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT quotation_no, customer_name, cities, total_cost, created_at, quotation_json
+        FROM quotations
+        ORDER BY internal_id DESC
+    """)
+
+    rows = cur.fetchall()
+    conn.close()
+    return [_row_to_record(r) for r in rows]
+
+
+def get_quotation(quotation_no):
+    """Single quotation as a dict (see get_all_quotations_full) or None."""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT quotation_no, customer_name, cities, total_cost, created_at, quotation_json
+        FROM quotations
+        WHERE quotation_no = ?
+    """, (quotation_no,))
+
+    row = cur.fetchone()
+    conn.close()
+    return _row_to_record(row) if row else None
+
+
+
+
+def delete_quotation(quotation_no):
+    """Permanently delete a quotation. Returns True if a row was removed."""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("DELETE FROM quotations WHERE quotation_no = ?", (quotation_no,))
+    deleted = cur.rowcount > 0
+
+    conn.commit()
+    conn.close()
+    return deleted
 
 
 def generate_quotation_no(internal_id):
