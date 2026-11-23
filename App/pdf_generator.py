@@ -327,6 +327,14 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
     else:
         star_summary = ", ".join(f"{c}: {hotel_stars[c]}-Star" for c in quotation_data['cities'])
     
+    # Nights are what the hotels charge; days = nights + 1. Older quotations only stored
+    # 'days_per_city' (and billed hotels on it), so they keep the previous wording.
+    if quotation_data.get('nights_per_city'):
+        total_nights = sum(quotation_data['nights_per_city'])
+        duration_text = f"{total_nights + 1} Days / {total_nights} Nights"
+    else:
+        duration_text = f"{sum(quotation_data['days_per_city'])} Days / {sum(quotation_data['days_per_city']) - 1} Nights"
+    
     story.append(Paragraph(
         f"<b>Package Cost INR {total_cost:,}/- Per Person</b> (Min {travelers} Paying Pax Traveling together)",
         styles['Highlight']
@@ -341,7 +349,7 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
     
     summary_data = [
         [Paragraph('<b>Destination</b>', styles['Normal']), Paragraph(cities_str, styles['Normal'])],
-        [Paragraph('<b>Duration</b>', styles['Normal']), Paragraph(f"{sum(quotation_data['days_per_city'])} Days / {sum(quotation_data['days_per_city']) - 1} Nights", styles['Normal'])],
+        [Paragraph('<b>Duration</b>', styles['Normal']), Paragraph(duration_text, styles['Normal'])],
         [Paragraph('<b>Arrival Date</b>', styles['Normal']), Paragraph(quotation_data.get('arrival_date', 'Not specified'), styles['Normal'])],
         [Paragraph('<b>Departure Date</b>', styles['Normal']), Paragraph(quotation_data.get('departure_date', 'Not specified'), styles['Normal'])],
         [Paragraph('<b>Travelers</b>', styles['Normal']), Paragraph(str(travelers), styles['Normal'])],
@@ -371,7 +379,8 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
         pricing = quotation_data['pricing'][city]
         room_cfg = quotation_data['room_config'][city]
         
-        hotel_info = f"<b>{pricing['days']} Nights {city}</b> stay at Hotel <b>{pricing['hotel_name']}</b> ({hotel_stars[city]}-Star)"
+        hotel_nights = pricing.get('nights', pricing['days'])  # older records: 'days' was the billed nights
+        hotel_info = f"<b>{hotel_nights} Nights {city}</b> stay at Hotel <b>{pricing['hotel_name']}</b> ({hotel_stars[city]}-Star)"
         story.append(Paragraph(hotel_info, styles['Normal']))
         
         room_info = f"Room Configuration: {room_cfg['rooms']} Room(s)"

@@ -246,25 +246,33 @@ def render_builder():
     # DAY INPUT
     # ------------------------------------------
 
-    days_input = st.text_input(
-        "Enter comma-separated days per city",
-        value=",".join(str(d) for d in prefill.get("days_per_city", [])) if prefill_cities else "",
-        placeholder="Example: 2,1,3"
+    nights_input = st.text_input(
+        "Enter comma-separated NIGHTS per city",
+        value=",".join(str(n) for n in prefill.get("nights_per_city", [])) if prefill_cities else "",
+        placeholder="Example: 2,1,1",
+        help="Hotel nights in each city. Total days = total nights + 1 (e.g. 2,1,1 = 4 nights / 5 days)."
     )
 
     try:
-        days_per_city = [int(x.strip()) for x in days_input.split(",")]
-        # FIX: Validate days are positive
-        if any(d <= 0 for d in days_per_city):
-            st.error("Days must be positive numbers (greater than 0)")
+        nights_per_city = [int(x.strip()) for x in nights_input.split(",")]
+        if any(n <= 0 for n in nights_per_city):
+            st.error("Nights must be positive numbers (greater than 0)")
             return
     except ValueError:
-        st.warning("Enter numbers only — like 2,1,3")
+        st.warning("Enter numbers only — like 2,1,1")
         return
 
-    if len(days_per_city) != len(cities):
-        st.warning("Number of day values must match number of cities selected.")
+    if len(nights_per_city) != len(cities):
+        st.warning("Number of night values must match number of cities selected.")
         return
+
+    # Itinerary days per city: one day per night, plus the departure day in the last city.
+    # (2,1,1 nights -> 2,1,2 days: 4 nights / 5 days in total.)
+    days_per_city = nights_per_city[:-1] + [nights_per_city[-1] + 1]
+    st.caption(
+        f"🌙 {sum(nights_per_city)} nights / ☀️ {sum(days_per_city)} days in total "
+        f"({', '.join(f'{c}: {n}N' for c, n in zip(cities, nights_per_city))})"
+    )
 
     # ------------------------------------------
     # ROUTE PREVIEW + EARLY FEASIBILITY CHECKS
@@ -283,6 +291,7 @@ def render_builder():
     render_flags(check_plan(
         cities,
         days_per_city=days_per_city,
+        nights_per_city=nights_per_city,
         legs=route["legs"],
         arrival_date=arrival_date,
         departure_date=departure_date,
@@ -354,7 +363,7 @@ def render_builder():
     # ------------------------------
     # LOOP PER CITY
     # ------------------------------
-    for idx, (city, days) in enumerate(zip(cities, days_per_city)):
+    for idx, (city, days, nights) in enumerate(zip(cities, days_per_city, nights_per_city)):
         progress_text.text(f"Processing {city}... ({idx + 1}/{len(cities)})")
         progress_bar.progress((idx + 1) / len(cities))
 
@@ -459,11 +468,11 @@ def render_builder():
             effective_price = st.session_state.price_override.get(city, selected_hotel["price"])
             hotel_name = selected_hotel["hotel_name"]
 
-            hotel_room_cost = effective_price * rooms * days
+            hotel_room_cost = effective_price * rooms * nights
 
             extra_bed_cost = 0
             if extra_bed:
-                extra_bed_cost = extra_bed_price * days
+                extra_bed_cost = extra_bed_price * nights
 
             hotel_cost = hotel_room_cost + extra_bed_cost
 
@@ -513,14 +522,14 @@ def render_builder():
             total_cost += city_total
 
             cost_per_day_total = city_total / days
-            cost_per_day_hotel = hotel_cost_total / days
+            cost_per_day_hotel = hotel_cost_total / days  # display only: daily figures add up to the city total
             cost_per_day_car = car_cost_total / days if car_cost_total else 0
 
             st.info(
                 f"""
                 Hotel Pricing Breakdown for {city}:
-                - Rooms: {rooms} × ₹{effective_price:,} × {days} nights = ₹{hotel_room_cost:,}
-                - Extra Bed: ₹{extra_bed_price:,} × {days} nights = ₹{extra_bed_cost:,}
+                - Rooms: {rooms} × ₹{effective_price:,} × {nights} nights = ₹{hotel_room_cost:,}
+                - Extra Bed: ₹{extra_bed_price:,} × {nights} nights = ₹{extra_bed_cost:,}
                 """
             )
 
@@ -541,6 +550,7 @@ def render_builder():
 
             multi_city_pricing[city] = {
                 "days": days,
+                "nights": nights,
                 "hotel_name": hotel_name,
                 "base_price": selected_hotel["price"],
                 "final_price": st.session_state.price_override.get(city, selected_hotel["price"]),
@@ -603,7 +613,7 @@ def render_builder():
     st.subheader("💰 Pricing Overview")
     for city in cities:
         data = multi_city_pricing[city]
-        st.write(f"### {city} — {data['days']} Days")
+        st.write(f"### {city} — {data['nights']} Night(s)")
         st.write(f"Hotel: {data['hotel_name']} ({city_stars[city]}-Star)")
         st.write(f"Hotel Total: ₹{data['hotel_cost_total']:,}")
         st.write(f"Car Total: ₹{data['car_cost_total']:,}")
@@ -652,6 +662,7 @@ def render_builder():
     plan_flags = check_plan(
         cities,
         days_per_city=days_per_city,
+        nights_per_city=nights_per_city,
         legs=route["legs"],
         itinerary=all_itineraries,
         car_details=car_details,
@@ -669,6 +680,7 @@ def render_builder():
     travel_plan = {
         "cities": cities,
         "days_per_city": days_per_city,
+        "nights_per_city": nights_per_city,
         "travelers": travelers,
         "hotel_stars": city_stars,
         "sightseeing": all_sightseeing,

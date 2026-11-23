@@ -94,7 +94,9 @@ def build_clone_prefill(record):
     """Turn a stored quotation into the form defaults used by the 'New Quotation' tab."""
     data = record["data"]
     cities = list(data.get("cities", []))
-    days = list(data.get("days_per_city", []))
+    # Nights are what the form asks for. Quotations saved before nights existed billed their
+    # hotels on 'days_per_city', so those values are the nights to reproduce.
+    nights = list(data.get("nights_per_city") or data.get("days_per_city", []))
 
     # Older records stored a single `hotel_star` instead of a per-city dict.
     stars = data.get("hotel_stars") or {c: data.get("hotel_star") for c in cities}
@@ -106,7 +108,7 @@ def build_clone_prefill(record):
         "source_no": record["quotation_no"],
         "customer_name": record["customer_name"] or "",
         "cities": cities,
-        "days_per_city": days,
+        "nights_per_city": nights,
         "travelers": data.get("travelers") or 2,
         "stars": {c: s for c, s in stars.items() if s in STAR_OPTIONS},
         "notes": data.get("notes_per_city") or {},
@@ -151,13 +153,14 @@ def _records_to_df(records):
     rows = []
     for r in records:
         data = r["data"]
-        days = data.get("days_per_city") or []
+        nights = data.get("nights_per_city")
+        days = (sum(nights) + 1) if nights else sum(data.get("days_per_city") or []) or None
         rows.append({
             "Quotation No": r["quotation_no"],
             "Customer": r["customer_name"],
             "Cities": r["cities"],
             "Travelers": data.get("travelers"),
-            "Days": sum(days) if days else None,
+            "Days": days,
             "Total (₹)": r["total_cost"] or 0,
             "Created": pd.to_datetime(r["created_at"], errors="coerce"),
         })
@@ -221,7 +224,10 @@ def _render_detail(record, company_config):
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Total", f"₹{(record['total_cost'] or 0):,.0f}")
     m2.metric("Travelers", data.get("travelers", "—"))
-    m3.metric("Days", sum(data.get("days_per_city") or []) or "—")
+    if data.get("nights_per_city"):
+        m3.metric("Duration", f"{sum(data['nights_per_city']) + 1}D / {sum(data['nights_per_city'])}N")
+    else:
+        m3.metric("Days", sum(data.get("days_per_city") or []) or "—")
     m4.metric("Created", record["created_at"])
 
     if data.get("arrival_date"):
@@ -232,7 +238,7 @@ def _render_detail(record, company_config):
         city_rows = [
             {
                 "City": city,
-                "Days": p.get("days"),
+                "Nights": p.get("nights", p.get("days")),
                 "Hotel": p.get("hotel_name"),
                 "Hotel total (₹)": p.get("hotel_cost_total"),
                 "Car total (₹)": p.get("car_cost_total"),

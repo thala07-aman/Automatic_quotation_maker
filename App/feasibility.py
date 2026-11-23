@@ -31,10 +31,12 @@ def _fmt(hours):
 
 
 def check_plan(cities, days_per_city=None, legs=None, itinerary=None,
-               car_details=None, arrival_date=None, departure_date=None):
+               car_details=None, arrival_date=None, departure_date=None,
+               nights_per_city=None):
     """
     cities:         ordered list of city names
-    days_per_city:  list of ints aligned with cities
+    days_per_city:  list of ints aligned with cities (itinerary days; last city includes the departure day)
+    nights_per_city: list of ints aligned with cities (hotel nights); used for the dates check when given
     legs:           list of {"from","to","km","hours"} between consecutive cities
     itinerary:      {city: [day dicts with optional "landmarks"]}
     car_details:    {city: {"required": bool, ...}}
@@ -47,7 +49,8 @@ def check_plan(cities, days_per_city=None, legs=None, itinerary=None,
     car_details = car_details or {}
 
     inbound = {leg["to"]: leg for leg in legs}  # leg that arrives INTO each city
-    day_counts = dict(zip(cities, days_per_city))
+    stay_unit = "night" if nights_per_city else "day"
+    day_counts = dict(zip(cities, nights_per_city or days_per_city))
 
     # --- 1. long transfers + no car -------------------------------------
     for leg in legs:
@@ -80,7 +83,7 @@ def check_plan(cities, days_per_city=None, legs=None, itinerary=None,
         if day_counts.get(city) == 1 and leg["hours"] >= SHORT_STAY_LEG_HOURS:
             flags.append(_flag(
                 "warning",
-                f"{city} has only 1 day but getting there takes about {_fmt(leg['hours'])}, "
+                f"{city} has only 1 {stay_unit} but getting there takes about {_fmt(leg['hours'])}, "
                 "leaving very little time to see it.",
                 city,
             ))
@@ -111,15 +114,25 @@ def check_plan(cities, days_per_city=None, legs=None, itinerary=None,
                 city,
             ))
 
-    # --- 4. dates vs total days ----------------------------------------
-    if arrival_date and departure_date and days_per_city:
-        total_days = sum(days_per_city)
-        span = (departure_date - arrival_date).days
-        # Accept either reading of "N days": N calendar days (span == N - 1) or span == N.
-        if span not in (total_days, total_days - 1):
-            flags.append(_flag(
-                "warning",
-                f"Arrival and departure are {span} day(s) apart, but the cities add up to {total_days} day(s).",
-            ))
+    # --- 4. dates vs total nights --------------------------------------
+    if arrival_date and departure_date and (nights_per_city or days_per_city):
+        span = (departure_date - arrival_date).days  # nights between arrival and departure
+        if nights_per_city:
+            total_nights = sum(nights_per_city)
+            if span != total_nights:
+                flags.append(_flag(
+                    "warning",
+                    f"Arrival to departure is {span} night(s) "
+                    f"({arrival_date:%d %b} to {departure_date:%d %b}), "
+                    f"but the cities add up to {total_nights} night(s).",
+                ))
+        else:
+            # Legacy callers pass days only: accept either reading of "N days".
+            total_days = sum(days_per_city)
+            if span not in (total_days, total_days - 1):
+                flags.append(_flag(
+                    "warning",
+                    f"Arrival and departure are {span} day(s) apart, but the cities add up to {total_days} day(s).",
+                ))
 
     return flags

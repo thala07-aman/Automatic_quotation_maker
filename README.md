@@ -9,7 +9,7 @@ This application streamlines the process of creating professional travel quotati
 ## ✨ Features
 
 ### Core Functionality
-- **Multi-City Planning**: Support for multiple cities in a single trip with customizable days per city
+- **Multi-City Planning**: Support for multiple cities in a single trip with customizable nights per city
 - **Dynamic Pricing**: Excel-based pricing engine for hotels and car rentals
 - **Hotel Options**: Three-tier hotel selection (Best Value, Option B, Option C) with AI-generated recommendations
 - **Room Configuration**: Flexible room allocation with extra bed support

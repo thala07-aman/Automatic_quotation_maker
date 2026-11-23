@@ -76,7 +76,7 @@ at.text_input[0].set_value("Flow Test").run()
 at.date_input[0].set_value(date(2026, 3, 1)).run()
 at.date_input[1].set_value(date(2026, 3, 3)).run()
 at.multiselect[0].set_value(["Agra"]).run()
-[t for t in at.text_input if "days per city" in t.label][0].set_value("2").run()
+[t for t in at.text_input if "NIGHTS per city" in t.label][0].set_value("2").run()
 
 btn("Generate Travel Quotation").click().run()
 print("after generate : exceptions", [e.value for e in at.exception])
