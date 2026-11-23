@@ -1,7 +1,89 @@
+import difflib
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from llm_client import chat
+
+_TAIL_WORDS = ("dinner", "return", "check-out", "check out", "checkout", "departure", "transfer")
+
+
+def _match_place(name: Optional[str], places: List[str]) -> Optional[str]:
+    """Map a landmark name written by the AI back to the exact sightseeing place name."""
+    if not name:
+        return None
+    n = name.strip().lower()
+    lowered = {p.lower(): p for p in places}
+    if n in lowered:
+        return lowered[n]
+    for low, original in lowered.items():
+        if low in n or n in low:
+            return original
+    close = difflib.get_close_matches(n, list(lowered), n=1, cutoff=0.75)
+    return lowered[close[0]] if close else None
+
+
+def ensure_places_in_itinerary(
+        days_list: List[Dict[str, Any]], places: List[str], must_places: Optional[List[str]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Guarantee that the itinerary and the sightseeing list agree:
+      * every day's `landmarks` / `key_landmark` uses an exact sightseeing place name;
+      * every sightseeing place appears in at least one day's activities
+        (missing ones are added as a "Visit <place>" activity on the lightest day);
+      * must-visit places (taken from the client's notes) are listed first in `landmarks`
+        and become the day's `key_landmark`, so they get photos before anything else.
+    """
+    if not days_list or not places:
+        return days_list
+    must = [p for p in (must_places or []) if p in places]
+
+    # 1. Canonical landmark names; fill from places the activities already mention
+    for day in days_list:
+        text = " ".join(day.get("activities") or []).lower()
+        landmarks = [m for m in (_match_place(l, places) for l in day.get("landmarks") or []) if m]
+        landmarks = list(dict.fromkeys(landmarks))
+        for place in must:      # a must-visit place named in the activities is never left out
+            if place.lower() in text and place not in landmarks:
+                landmarks.append(place)
+        for place in places:
+            if len(landmarks) >= 2:
+                break
+            if place.lower() in text and place not in landmarks:
+                landmarks.append(place)
+        day["landmarks"] = sorted(landmarks, key=lambda p: p not in must)
+        key = _match_place(day.get("key_landmark"), places)
+        if day["landmarks"] and day["landmarks"][0] in must:
+            key = day["landmarks"][0]
+        day["key_landmark"] = key or (day["landmarks"][0] if day["landmarks"] else day.get("key_landmark"))
+
+    # 2. Any place not mentioned anywhere gets added to a day (must-visit places first)
+    all_text = " ".join(" ".join(d.get("activities") or []) for d in days_list).lower()
+    # arrival / departure days are light, so use them only when there are few days
+    order = list(range(len(days_list)))
+    if len(days_list) > 2:
+        order = order[1:-1]
+    for place in must + [p for p in places if p not in must]:
+        if place.lower() in all_text:
+            continue
+        # spread must-visit places over the days so each one can get a photo
+        target = days_list[min(order, key=lambda i: (
+            sum(1 for l in days_list[i]["landmarks"] if l in must), len(days_list[i]["landmarks"])
+        ))]
+        activities = target.setdefault("activities", [])
+        pos = len(activities)
+        while pos > 0 and any(w in activities[pos - 1].lower() for w in _TAIL_WORDS):
+            pos -= 1
+        activities.insert(pos, f"Visit {place}")
+        if place in must:
+            target["landmarks"].insert(0, place)
+            target["key_landmark"] = place
+        else:
+            target["landmarks"].append(place)
+            if not target.get("key_landmark"):
+                target["key_landmark"] = place
+        all_text += f" visit {place.lower()}"
+        print(f"Itinerary was missing '{place}', added it to '{target.get('title')}'")
+    return days_list
 
 
 def generate_itinerary(
@@ -19,9 +101,14 @@ def generate_itinerary(
 
     # format sightseeing places for AI prompt
     sightseeing_details = "\n".join([
-        f"- {item['place']}: {item['description']}"
+        f"- {item['place']}: {item['description']}" + (" [MUST VISIT - requested by client]" if item.get("must_visit") else "")
         for item in sightseeing_list
     ])
+    must_places = [item["place"] for item in sightseeing_list if item.get("must_visit")]
+    must_rule = (
+        "MUST-VISIT places (requested by the client) - each one MUST appear as its own activity: "
+        + ", ".join(must_places) + ".\n"
+    ) if must_places else ""
 
     prompt = f"""
 You are an experienced travel planner creating a detailed day-by-day itinerary for {city}.
@@ -29,6 +116,7 @@ You are an experienced travel planner creating a detailed day-by-day itinerary f
 Available Attractions:
 {sightseeing_details}
 
+{must_rule}
 CRITICAL: Create EXACTLY {days} day(s) itinerary - no more, no less. The itinerary array must contain exactly {days} day objects.
 
 Create a {days}-day itinerary following this structure:
@@ -55,7 +143,7 @@ Last Day Guidelines:
 - Include buffer time for travel
 
 Important Rules:
-1. Use ONLY the attractions listed above
+1. Use ONLY the attractions listed above, and include EVERY one of them in the itinerary at least once
 2. Be specific about activities (e.g., "Visit Taj Mahal at sunrise for best photos")
 3. Include practical details (check-in, check-out, transfers)
 4. Mention meal times naturally (e.g., "Lunch at local restaurant near Red Fort")
@@ -102,6 +190,7 @@ Required JSON Format:
 CRITICAL:
 1. Include "key_landmark" field for each day with the main attraction to visit that day.
 2. Include "landmarks" array with exactly 2 specific landmarks/attractions that will be visited that day (these should be from the activities list).
+3. "key_landmark", "landmarks" and the activities must use the attraction names EXACTLY as written in the Available Attractions list.
 """
 
     try:
@@ -124,6 +213,11 @@ CRITICAL:
                 # Log warning but continue
                 print(f"Warning: AI generated only {actual_days} days instead of {days}.")
         
+        # every sightseeing place must be in the itinerary, under its exact name
+        ensure_places_in_itinerary(
+            itinerary_data.get("itinerary", []), [item["place"] for item in sightseeing_list], must_places
+        )
+
         # attach cost to each day
         for day in itinerary_data["itinerary"]:
             day["day_cost_total"] = round(cost_per_day_total, 2)

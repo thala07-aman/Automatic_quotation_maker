@@ -429,14 +429,15 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
                 # Get landmarks from the itinerary for this day
                 landmarks = day.get('landmarks', [])
                 
-                # Fallback: if no landmarks array, try to extract from activities or use key_landmark
+                # Fallback: keep the day's real landmarks; add key_landmark, and only guess from
+                # the activity text if the day has no landmark at all
                 if not landmarks or len(landmarks) < 2:
-                    landmarks = []
+                    landmarks = list(landmarks)
                     # Try key_landmark first
-                    if day.get('key_landmark'):
+                    if day.get('key_landmark') and day['key_landmark'] not in landmarks:
                         landmarks.append(day['key_landmark'])
                     # Try to extract landmarks from activities
-                    for activity in day.get('activities', []):
+                    for activity in (day.get('activities', []) if not landmarks else []):
                         if 'visit' in activity.lower() or 'explore' in activity.lower():
                             # Extract potential landmark names (simple heuristic)
                             words = activity.split()
@@ -449,6 +450,15 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
                         if len(landmarks) >= 2:
                             break
                     
+                # Places the client asked for in the notes take the (max 2) photo slots first
+                must = [
+                    spot.get('place') for spot in (quotation_data.get('sightseeing') or {}).get(city, [])
+                    if spot.get('must_visit') and spot.get('place')
+                ]
+                must_keys = {m.strip().lower() for m in must}
+                landmarks = sorted(
+                    [l for l in landmarks if l], key=lambda l: l.strip().lower() not in must_keys
+                )
                 # Only the day's own landmarks are requested here. If one has no usable photo,
                 # fetch_day_images_from_landmarks substitutes another place from this city
                 # (rest of the sightseeing list / other days' landmarks) or the city overview.
@@ -472,23 +482,23 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
                 )
                 
                 day_images = fetch_day_images_from_landmarks(
-                    city, landmarks, alternates=alternates, used=image_tracker
+                    city, landmarks, alternates=alternates, used=image_tracker, must=must
                 )
                 
-                # Build the row from whichever images we actually have (no blank cells)
-                image_row = []
-                caption_row = []
-                for slot in (1, 2):
-                    if day_images.get(f'image{slot}'):
+                # Build the rows (2 photos per row) from whichever images we actually have (no blank cells)
+                slots = sorted(
+                    int(k[5:]) for k in day_images if k.startswith('image') and day_images[k]
+                )
+                for start in range(0, len(slots), 2):
+                    image_row = []
+                    caption_row = []
+                    for slot in slots[start:start + 2]:
                         image_row.append(RLImage(
                             io.BytesIO(day_images[f'image{slot}']), width=3.58*inch, height=2.33*inch
                         ))
                         caption_row.append(Paragraph(
                             f"<i>{day_images.get(f'landmark{slot}_name', '')}</i>", styles['Normal']
                         ))
-                
-                # Only add the table if we have at least one image
-                if image_row:
                     col_widths = [3.58*inch] * len(image_row)
                     # Images table
                     images_table = Table([image_row], colWidths=col_widths)

@@ -39,8 +39,8 @@ PLACEHOLDER_IMAGE_URL = "https://via.placeholder.com/800x600/4A4A4A/FFFFFF?text=
 # ---------------------------------------------------------------------------
 # Image quality check + cache
 # ---------------------------------------------------------------------------
-MIN_IMAGE_WIDTH = 400
-MIN_IMAGE_HEIGHT = 250
+MIN_IMAGE_WIDTH = 800
+MIN_IMAGE_HEIGHT = 500
 MIN_IMAGE_CONTRAST = 10.0   # grayscale std-dev; a blank / single-colour image is ~0
 
 FOUND_TTL = 86400           # keep real photos for 24 hours
@@ -68,19 +68,30 @@ def is_usable_image(data: Optional[bytes]) -> bool:
         return False
 
 
-def _search_providers(city: str, landmark: Optional[str]) -> Optional[bytes]:
-    """Try each configured image source in turn; return the first usable photo, or None."""
+def _search_providers(city: str, landmark: Optional[str], must: bool = False) -> Optional[bytes]:
+    """Try each configured image source in turn; return the first usable photo, or None.
+
+    `must=True` (places the client asked for in the notes) adds extra, looser attempts after
+    the normal strict ones: Unsplash matching on any keyword, Commons by the landmark name
+    alone, then Pexels.
+    """
     if landmark:
         query = f"{landmark} {city} travel"
     else:
         query = f"{city} travel destination"
 
+    # Order: Unsplash -> Wikipedia -> Commons -> Pexels -> OpenAI (each only if configured)
     providers = []
     if UNSPLASH_ACCESS_KEY:
-        providers.append(("Unsplash", lambda: fetch_from_unsplash(query)))
+        providers.append(("Unsplash", lambda: fetch_from_unsplash(landmark, city)))
+    providers.append(("Wikipedia", lambda: fetch_from_wikipedia(landmark, city)))
+    providers.append(("Commons", lambda: fetch_from_commons(landmark, city)))
+    if must and landmark:
+        if UNSPLASH_ACCESS_KEY:
+            providers.append(("Unsplash (relaxed)", lambda: fetch_from_unsplash(landmark, city, relaxed=True)))
+        providers.append(("Commons (name only)", lambda: fetch_from_commons(landmark, city, name_only=True)))
     if PEXELS_API_KEY:
         providers.append(("Pexels", lambda: fetch_from_pexels(query)))
-    providers.append(("Wikipedia", lambda: fetch_from_wikipedia(landmark, city)))
     if OPENAI_IMAGE_FALLBACK and os.getenv("OPENAI_API_KEY"):
         providers.append(("OpenAI", lambda: fetch_from_openai(landmark, city)))
 
@@ -97,19 +108,20 @@ def _search_providers(city: str, landmark: Optional[str]) -> Optional[bytes]:
     return None
 
 
-def get_real_image(city: str, landmark: Optional[str] = None) -> Optional[bytes]:
+def get_real_image(city: str, landmark: Optional[str] = None, must: bool = False) -> Optional[bytes]:
     """
     A real, usable photo for a landmark (or the city if `landmark` is None), or None.
     Never returns a placeholder, so callers can pick a different place instead.
+    `must=True` searches harder (see `_search_providers`).
     """
-    key = (city.strip().lower(), (landmark or "").strip().lower())
+    key = (city.strip().lower(), (landmark or "").strip().lower(), must)
     hit = _IMAGE_CACHE.get(key)
     if hit:
         stamp, data = hit
         if time.time() - stamp < (FOUND_TTL if data else MISSING_TTL):
             return data
 
-    data = _search_providers(city, landmark)
+    data = _search_providers(city, landmark, must)
     _IMAGE_CACHE[key] = (time.time(), data)
     return data
 
@@ -119,27 +131,54 @@ def fetch_destination_image(city: str, landmark: str = None) -> bytes:
     return get_real_image(city, landmark) or fetch_placeholder_image(city, landmark)
 
 
-def fetch_from_unsplash(query: str) -> Optional[bytes]:
-    """Fetch image from Unsplash API"""
-    
+def _unsplash_text(photo: dict) -> str:
+    """All descriptive text Unsplash has for a photo, lower-cased."""
+    parts = [photo.get("description"), photo.get("alt_description"), photo.get("slug")]
+    parts += [t.get("title") for t in photo.get("tags") or []]
+    location = (photo.get("location") or {})
+    parts += [location.get("name"), location.get("city")]
+    return " ".join(p for p in parts if p).lower().replace("-", " ")
+
+
+def fetch_from_unsplash(landmark: Optional[str], city: str, relaxed: bool = False) -> Optional[bytes]:
+    """Fetch a photo from Unsplash that is actually of the place.
+
+    Unsplash search is fuzzy, so the top results are checked: a photo is only accepted if its
+    description/tags mention every word of the landmark name (or the city name for the city
+    overview). Otherwise None is returned and the next source (Wikipedia) is tried.
+    `relaxed=True` accepts a photo that mentions any one distinctive word of the name.
+    """
+    if landmark:
+        query = f"{landmark} {city}"
+        city_words = {w.lower() for w in city.split()}
+        required = {w.lower().strip(".,'()") for w in landmark.split() if len(w) > 2} - city_words
+        required = required or {w.lower().strip(".,'()") for w in landmark.split() if len(w) > 2}
+    else:
+        query = city
+        required = {w.lower().strip(".,'()") for w in city.split() if len(w) > 2}
+
     headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
-    params = {"query": query, "per_page": 1, "orientation": "landscape"}
-    
+    params = {"query": query, "per_page": 10, "orientation": "landscape"}
+
     try:
         response = requests.get(UNSPLASH_API_URL, headers=headers, params=params, timeout=10)
-        
-        if response.status_code == 200:
-            results = response.json().get("results")
-            if results:
-                # 'regular' is ~1080px wide, plenty for the PDF
-                img_response = requests.get(results[0]["urls"]["regular"], timeout=10)
-                if img_response.status_code == 200:
-                    return img_response.content
-        else:
+        if response.status_code != 200:
             print(f"Unsplash API returned {response.status_code}: {response.text[:200]}")
+            return None
+
+        for photo in response.json().get("results") or []:
+            text = _unsplash_text(photo)
+            matches = any if relaxed else all
+            if required and not matches(k in text for k in required):
+                continue
+            # 'raw' + w=1600 gives a sharp image that still prints well at 3.6 in wide
+            img_response = requests.get(f"{photo['urls']['raw']}&w=1600&q=85&fit=max", timeout=15)
+            if img_response.status_code == 200:
+                return img_response.content
+        print(f"Unsplash has no matching photo for '{query}', falling back")
     except Exception as e:
         print(f"Unsplash API error: {e}")
-    
+
     return None
 
 
@@ -194,7 +233,7 @@ def fetch_from_wikipedia(landmark: Optional[str], city: str) -> Optional[bytes]:
             params = {
                 "action": "query", "format": "json", "generator": "search",
                 "gsrsearch": term, "gsrlimit": 5,
-                "prop": "pageimages", "piprop": "thumbnail", "pithumbsize": 1000,
+                "prop": "pageimages", "piprop": "thumbnail", "pithumbsize": 1600,
             }
             response = _wikimedia_get(WIKIPEDIA_API_URL, params)
             if response is None:
@@ -205,7 +244,7 @@ def fetch_from_wikipedia(landmark: Optional[str], city: str) -> Optional[bytes]:
             for page in sorted(pages.values(), key=lambda p: p.get("index", 99)):
                 thumbnail = page.get("thumbnail", {})
                 thumb = thumbnail.get("source")
-                if not thumb or thumb.lower().endswith(".svg") or thumbnail.get("width", 0) < 500:
+                if not thumb or thumb.lower().endswith(".svg") or thumbnail.get("width", 0) < MIN_IMAGE_WIDTH:
                     continue
                 title_words = [w.lower().strip(".,'()") for w in page["title"].split()]
                 # exact word, or same 5-letter prefix for long words (spelling variants)
@@ -220,6 +259,50 @@ def fetch_from_wikipedia(landmark: Optional[str], city: str) -> Optional[bytes]:
         except Exception as e:
             print(f"Wikipedia API error for '{term}': {e}")
     
+    return None
+
+
+_COMMONS_SKIP_WORDS = ("map", "logo", "flag", "coat of arms", "diagram", "plan", "locator", "seal", "poster")
+
+
+def fetch_from_commons(landmark: Optional[str], city: str, name_only: bool = False) -> Optional[bytes]:
+    """Search Wikimedia Commons (free, no key) for a large landscape photo of the place.
+
+    Covers places whose Wikipedia article has no (or only a tiny) lead image. Only JPEGs at
+    least 1600px wide, landscape, whose file name mentions the place are accepted.
+    `name_only=True` searches the landmark name without the city (for places filed under a
+    different city / region name on Commons).
+    """
+    subject = landmark or city
+    city_words = {w.lower() for w in city.split()}
+    keywords = {w.lower().strip(".,'()") for w in subject.split() if len(w) > 2} - (city_words if landmark else set())
+    if not keywords:
+        keywords = {w.lower() for w in subject.split() if len(w) > 2}
+
+    term = f"{landmark} {city}" if landmark and not name_only else subject
+    params = {
+        "action": "query", "format": "json", "generator": "search",
+        "gsrsearch": f"{term} filetype:bitmap", "gsrnamespace": 6, "gsrlimit": 12,
+        "prop": "imageinfo", "iiprop": "url|size|mime", "iiurlwidth": 1600,
+    }
+    response = _wikimedia_get("https://commons.wikimedia.org/w/api.php", params)
+    if response is None:
+        return None
+
+    pages = response.json().get("query", {}).get("pages", {})
+    for page in sorted(pages.values(), key=lambda p: p.get("index", 99)):
+        info = (page.get("imageinfo") or [{}])[0]
+        title = page.get("title", "").lower()
+        width, height = info.get("width", 0), info.get("height", 0)
+        if info.get("mime") != "image/jpeg" or width < 1600 or width < height * 1.2:
+            continue
+        if any(bad in title for bad in _COMMONS_SKIP_WORDS):
+            continue
+        if not any(k in title for k in keywords):
+            continue
+        img_response = _wikimedia_get(info.get("thumburl") or info["url"])
+        if img_response is not None:
+            return img_response.content
     return None
 
 
@@ -274,7 +357,7 @@ def fetch_from_pexels(query: str) -> Optional[bytes]:
             
             if data.get("photos") and len(data["photos"]) > 0:
                 # Get the large size image URL
-                image_url = data["photos"][0]["src"]["large"]
+                image_url = data["photos"][0]["src"]["large2x"]
                 
                 # Download the image
                 img_response = requests.get(image_url, timeout=10)
@@ -322,14 +405,14 @@ def fetch_placeholder_image(city: str, landmark: str = None) -> bytes:
     return buffer.getvalue()
 
 
-def resize_image_for_pdf(image_bytes: bytes, max_width: int = 344, max_height: int = 224) -> bytes:
+def resize_image_for_pdf(image_bytes: bytes, max_width: int = 1100, max_height: int = 716) -> bytes:
     """
-    Resize image to fit PDF layout (9.1 cm width × 5.93 cm height).
+    Resize image to fit PDF layout (9.1 cm width × 5.93 cm height) at ~300 DPI.
     
     Args:
         image_bytes: Original image bytes
-        max_width: Maximum width in pixels (344px = 9.1cm)
-        max_height: Maximum height in pixels (224px = 5.93cm)
+        max_width: Maximum width in pixels (1100px = 9.1cm at ~300 DPI)
+        max_height: Maximum height in pixels (716px = 5.93cm at ~300 DPI)
         
     Returns:
         Resized image bytes
@@ -347,7 +430,7 @@ def resize_image_for_pdf(image_bytes: bytes, max_width: int = 344, max_height: i
         
         # Save to bytes
         buffer = io.BytesIO()
-        img.save(buffer, format='JPEG', quality=85)
+        img.save(buffer, format='JPEG', quality=90)
         return buffer.getvalue()
         
     except Exception as e:
@@ -390,10 +473,12 @@ def new_image_tracker() -> Dict[str, set]:
 
 def pick_day_images(city: str, preferred: List[str], alternates: Optional[List[str]] = None,
                     used: Optional[Dict[str, set]] = None, count: int = 2,
-                    max_attempts: int = 8) -> List[Tuple[str, bytes]]:
+                    max_attempts: int = 8, must: Optional[List[str]] = None) -> List[Tuple[str, bytes]]:
     """
     Choose up to `count` photos for one itinerary day.
 
+    0. `must` places (requested by the client in the notes) are searched with every source,
+       including the looser ones, and are always tried first.
     1. The day's own landmarks (`preferred`) are tried first.
     2. If one has no usable photo, other places from the city (`alternates`) are tried, skipping
        places and photos already used elsewhere in the PDF.
@@ -402,6 +487,10 @@ def pick_day_images(city: str, preferred: List[str], alternates: Optional[List[s
     Returns [(place_name, jpeg_bytes), ...], possibly fewer than `count`. Never contains placeholders.
     """
     used = used if used is not None else new_image_tracker()
+    must_keys = {m.strip().lower() for m in (must or [])}
+    # places the client asked for come first; only the extra tries for them don't count as attempts
+    preferred = sorted([p for p in preferred if p], key=lambda p: p.strip().lower() not in must_keys)
+    max_attempts += sum(1 for p in preferred if p.strip().lower() in must_keys)
 
     candidates = [(n, n, True) for n in preferred if n]
     candidates += [(n, n, False) for n in (alternates or []) if n]
@@ -421,7 +510,7 @@ def pick_day_images(city: str, preferred: List[str], alternates: Optional[List[s
             continue
 
         attempts += 1
-        raw = get_real_image(city, landmark)
+        raw = get_real_image(city, landmark, must=name_key in must_keys)
         if not raw:
             print(f"No usable image for '{name}' ({city}), trying another place")
             continue
@@ -442,16 +531,18 @@ def pick_day_images(city: str, preferred: List[str], alternates: Optional[List[s
 
 
 def fetch_day_images_from_landmarks(city: str, landmarks: list, alternates: Optional[list] = None,
-                                    used: Optional[Dict[str, set]] = None) -> dict:
+                                    used: Optional[Dict[str, set]] = None,
+                                    must: Optional[list] = None) -> dict:
     """
-    Fetch up to 2 images for a day. If a landmark has no usable photo, another place from
-    `alternates` (or the city overview) is used instead.
+    Fetch up to 2 images for a day. `must` places (from the client's notes) take the slots first.
+    If a landmark has no usable photo, another place from `alternates` (or the city overview)
+    is used instead.
 
     Returns {'image1', 'landmark1_name', 'image2', 'landmark2_name'}; keys are missing for any
     slot that could not be filled.
     """
     images = {}
-    for i, (name, data) in enumerate(pick_day_images(city, landmarks, alternates, used), start=1):
+    for i, (name, data) in enumerate(pick_day_images(city, landmarks, alternates, used, must=must), start=1):
         images[f'image{i}'] = data
         images[f'landmark{i}_name'] = name
     return images
