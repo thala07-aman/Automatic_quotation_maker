@@ -6,10 +6,11 @@ Fetches images from Unsplash / Pexels (if API keys are set), then Wikipedia
 
 import requests
 import io
-from PIL import Image
+import hashlib
+from PIL import Image, ImageStat
 import os
 import time
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -35,52 +36,87 @@ PEXELS_API_URL = "https://api.pexels.com/v1/search"
 PLACEHOLDER_IMAGE_URL = "https://via.placeholder.com/800x600/4A4A4A/FFFFFF?text="
 
 
-@st.cache_data(ttl=86400, show_spinner=False)  # Cache for 24 hours
-def fetch_destination_image(city: str, landmark: str = None) -> Optional[bytes]:
-    """
-    Fetch a high-quality image for a destination or landmark.
-    
-    Args:
-        city: City name
-        landmark: Optional specific landmark name
-        
-    Returns:
-        Image bytes or None if fetch fails
-    """
-    
-    # Build search query
+# ---------------------------------------------------------------------------
+# Image quality check + cache
+# ---------------------------------------------------------------------------
+MIN_IMAGE_WIDTH = 400
+MIN_IMAGE_HEIGHT = 250
+MIN_IMAGE_CONTRAST = 10.0   # grayscale std-dev; a blank / single-colour image is ~0
+
+FOUND_TTL = 86400           # keep real photos for 24 hours
+MISSING_TTL = 900           # retry "not found" after 15 minutes (it may have been a throttled request)
+
+# Only successes live long. st.cache_data used to cache failures (and placeholders) for a whole day.
+_IMAGE_CACHE: Dict[tuple, Tuple[float, Optional[bytes]]] = {}
+
+
+def is_usable_image(data: Optional[bytes]) -> bool:
+    """True if `data` is a decodable photo that is big enough and not blank / a flat colour."""
+    if not data:
+        return False
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+    except Exception:
+        return False
+    if img.width < MIN_IMAGE_WIDTH or img.height < MIN_IMAGE_HEIGHT:
+        return False
+    try:
+        small = img.convert("L").resize((64, 64))
+        return ImageStat.Stat(small).stddev[0] >= MIN_IMAGE_CONTRAST
+    except Exception:
+        return False
+
+
+def _search_providers(city: str, landmark: Optional[str]) -> Optional[bytes]:
+    """Try each configured image source in turn; return the first usable photo, or None."""
     if landmark:
         query = f"{landmark} {city} travel"
     else:
         query = f"{city} travel destination"
-    
-    try:
-        # Try Unsplash first, then Pexels
-        if UNSPLASH_ACCESS_KEY:
-            img = fetch_from_unsplash(query)
-            if img:
-                return img
-        
-        if PEXELS_API_KEY:
-            img = fetch_from_pexels(query)
-            if img:
-                return img
-        
-        img = fetch_from_wikipedia(landmark, city)
-        if img:
+
+    providers = []
+    if UNSPLASH_ACCESS_KEY:
+        providers.append(("Unsplash", lambda: fetch_from_unsplash(query)))
+    if PEXELS_API_KEY:
+        providers.append(("Pexels", lambda: fetch_from_pexels(query)))
+    providers.append(("Wikipedia", lambda: fetch_from_wikipedia(landmark, city)))
+    if OPENAI_IMAGE_FALLBACK and os.getenv("OPENAI_API_KEY"):
+        providers.append(("OpenAI", lambda: fetch_from_openai(landmark, city)))
+
+    for name, fetch in providers:
+        try:
+            img = fetch()
+        except Exception as e:
+            print(f"{name} image error for '{query}': {e}")
+            continue
+        if is_usable_image(img):
             return img
-        
-        if OPENAI_IMAGE_FALLBACK and os.getenv("OPENAI_API_KEY"):
-            img = fetch_from_openai(landmark, city)
-            if img:
-                return img
-        
-        # Fallback to placeholder
-        return fetch_placeholder_image(city, landmark)
-            
-    except Exception as e:
-        print(f"Error fetching image for {query}: {e}")
-        return fetch_placeholder_image(city, landmark)
+        if img:
+            print(f"{name} returned an unusable image for '{query}', trying next source")
+    return None
+
+
+def get_real_image(city: str, landmark: Optional[str] = None) -> Optional[bytes]:
+    """
+    A real, usable photo for a landmark (or the city if `landmark` is None), or None.
+    Never returns a placeholder, so callers can pick a different place instead.
+    """
+    key = (city.strip().lower(), (landmark or "").strip().lower())
+    hit = _IMAGE_CACHE.get(key)
+    if hit:
+        stamp, data = hit
+        if time.time() - stamp < (FOUND_TTL if data else MISSING_TTL):
+            return data
+
+    data = _search_providers(city, landmark)
+    _IMAGE_CACHE[key] = (time.time(), data)
+    return data
+
+
+def fetch_destination_image(city: str, landmark: str = None) -> bytes:
+    """Real photo if one can be found, otherwise a text placeholder (legacy behaviour)."""
+    return get_real_image(city, landmark) or fetch_placeholder_image(city, landmark)
 
 
 def fetch_from_unsplash(query: str) -> Optional[bytes]:
@@ -347,36 +383,77 @@ def fetch_city_images(city: str, num_images: int = 2) -> Dict[str, bytes]:
     return images
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def fetch_day_images_from_landmarks(city: str, landmarks: list) -> Dict[str, bytes]:
+def new_image_tracker() -> Dict[str, set]:
+    """Tracks which places / photos were already used in one PDF, so substitutes aren't repeated."""
+    return {"names": set(), "hashes": set()}
+
+
+def pick_day_images(city: str, preferred: List[str], alternates: Optional[List[str]] = None,
+                    used: Optional[Dict[str, set]] = None, count: int = 2,
+                    max_attempts: int = 8) -> List[Tuple[str, bytes]]:
     """
-    Fetch 2 images for specific landmarks mentioned in the day's itinerary.
-    
-    Args:
-        city: City name
-        landmarks: List of 2 landmark names from the itinerary
-        
-    Returns:
-        Dictionary with 'image1' and 'image2' keys containing image bytes
+    Choose up to `count` photos for one itinerary day.
+
+    1. The day's own landmarks (`preferred`) are tried first.
+    2. If one has no usable photo, other places from the city (`alternates`) are tried, skipping
+       places and photos already used elsewhere in the PDF.
+    3. As a last resort the city's overview photo is used.
+
+    Returns [(place_name, jpeg_bytes), ...], possibly fewer than `count`. Never contains placeholders.
+    """
+    used = used if used is not None else new_image_tracker()
+
+    candidates = [(n, n, True) for n in preferred if n]
+    candidates += [(n, n, False) for n in (alternates or []) if n]
+    candidates.append((city, None, False))      # city overview photo
+
+    chosen: List[Tuple[str, bytes]] = []
+    day_names, day_hashes = set(), set()
+    attempts = 0
+
+    for name, landmark, is_preferred in candidates:
+        if len(chosen) >= count or attempts >= max_attempts:
+            break
+        name_key = name.strip().lower()
+        if name_key in day_names:
+            continue
+        if not is_preferred and name_key in used["names"]:
+            continue
+
+        attempts += 1
+        raw = get_real_image(city, landmark)
+        if not raw:
+            print(f"No usable image for '{name}' ({city}), trying another place")
+            continue
+
+        digest = hashlib.md5(raw).hexdigest()
+        if digest in day_hashes or (not is_preferred and digest in used["hashes"]):
+            continue
+
+        chosen.append((name, resize_image_for_pdf(raw)))
+        day_names.add(name_key)
+        day_hashes.add(digest)
+        used["names"].add(name_key)
+        used["hashes"].add(digest)
+
+    if preferred and chosen and [n for n, _ in chosen] != list(preferred)[:len(chosen)]:
+        print(f"Image substitution in {city}: wanted {list(preferred)}, using {[n for n, _ in chosen]}")
+    return chosen
+
+
+def fetch_day_images_from_landmarks(city: str, landmarks: list, alternates: Optional[list] = None,
+                                    used: Optional[Dict[str, set]] = None) -> dict:
+    """
+    Fetch up to 2 images for a day. If a landmark has no usable photo, another place from
+    `alternates` (or the city overview) is used instead.
+
+    Returns {'image1', 'landmark1_name', 'image2', 'landmark2_name'}; keys are missing for any
+    slot that could not be filled.
     """
     images = {}
-    
-    # Fetch first landmark image
-    if landmarks and len(landmarks) > 0:
-        landmark1 = landmarks[0]
-        img1 = fetch_destination_image(city, landmark1)
-        if img1:
-            images['image1'] = resize_image_for_pdf(img1)
-            images['landmark1_name'] = landmark1
-    
-    # Fetch second landmark image
-    if landmarks and len(landmarks) > 1:
-        landmark2 = landmarks[1]
-        img2 = fetch_destination_image(city, landmark2)
-        if img2:
-            images['image2'] = resize_image_for_pdf(img2)
-            images['landmark2_name'] = landmark2
-    
+    for i, (name, data) in enumerate(pick_day_images(city, landmarks, alternates, used), start=1):
+        images[f'image{i}'] = data
+        images[f'landmark{i}_name'] = name
     return images
 
 

@@ -17,7 +17,7 @@ from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import io
-from image_fetcher import fetch_city_images
+from image_fetcher import fetch_city_images, new_image_tracker
 
 
 PAGE_W, PAGE_H = letter  # 612 x 792 pt, same as the reference PDF
@@ -389,6 +389,7 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
     story.append(Paragraph("Travel Plan", styles['SectionHeader']))
     
     day_counter = 1
+    image_tracker = new_image_tracker()  # remembers which places/photos this PDF already used
     for city in quotation_data['cities']:
         itinerary = quotation_data['itinerary'][city]
         
@@ -414,7 +415,7 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
             
             # Add 2 images of landmarks from the day's itinerary (9.1 cm width × 5.93 cm height each)
             try:
-                from image_fetcher import fetch_day_images_from_landmarks, fetch_destination_image, resize_image_for_pdf
+                from image_fetcher import fetch_day_images_from_landmarks
                 
                 # Get landmarks from the itinerary for this day
                 landmarks = day.get('landmarks', [])
@@ -439,48 +440,49 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
                         if len(landmarks) >= 2:
                             break
                     
-                    # Final fallback: use generic city searches
-                    if len(landmarks) < 2:
-                        landmarks.append(f"{city} landmark")
-                        landmarks.append(f"{city} attraction")
+                # Only the day's own landmarks are requested here. If one has no usable photo,
+                # fetch_day_images_from_landmarks substitutes another place from this city
+                # (rest of the sightseeing list / other days' landmarks) or the city overview.
+                landmarks = landmarks[:2]
                 
-                # Ensure we have exactly 2 landmarks
-                landmarks = landmarks[:2]  # Take first 2
-                while len(landmarks) < 2:
-                    landmarks.append(f"{city} tourism")
+                own = {l.strip().lower() for l in landmarks}
+                scheduled = set()  # places some day of this city already features
+                for other_day in itinerary:
+                    scheduled.add((other_day.get('key_landmark') or '').strip().lower())
+                    scheduled.update((l or '').strip().lower() for l in (other_day.get('landmarks') or []))
                 
-                day_images = fetch_day_images_from_landmarks(city, landmarks)
+                candidates = [spot.get('place') for spot in (quotation_data.get('sightseeing') or {}).get(city, [])]
+                for other_day in itinerary:
+                    candidates.append(other_day.get('key_landmark'))
+                    candidates.extend(other_day.get('landmarks') or [])
+                candidates = [c for c in dict.fromkeys(candidates) if c and c.strip().lower() not in own]
+                # Prefer places no day is showing (so no photo repeats); borrow another day's landmark only as a last resort
+                alternates = (
+                    [c for c in candidates if c.strip().lower() not in scheduled]
+                    + [c for c in candidates if c.strip().lower() in scheduled]
+                )
                 
-                # Create a table with 2 images in one row
+                day_images = fetch_day_images_from_landmarks(
+                    city, landmarks, alternates=alternates, used=image_tracker
+                )
+                
+                # Build the row from whichever images we actually have (no blank cells)
                 image_row = []
                 caption_row = []
-                
-                if day_images.get('image1'):
-                    img1 = RLImage(io.BytesIO(day_images['image1']), width=3.58*inch, height=2.33*inch)
-                    image_row.append(img1)
-                    caption_row.append(Paragraph(
-                        f"<i>{day_images.get('landmark1_name', landmarks[0])}</i>",
-                        styles['Normal']
-                    ))
-                else:
-                    image_row.append('')
-                    caption_row.append('')
-                
-                if day_images.get('image2'):
-                    img2 = RLImage(io.BytesIO(day_images['image2']), width=3.58*inch, height=2.33*inch)
-                    image_row.append(img2)
-                    caption_row.append(Paragraph(
-                        f"<i>{day_images.get('landmark2_name', landmarks[1])}</i>",
-                        styles['Normal']
-                    ))
-                else:
-                    image_row.append('')
-                    caption_row.append('')
+                for slot in (1, 2):
+                    if day_images.get(f'image{slot}'):
+                        image_row.append(RLImage(
+                            io.BytesIO(day_images[f'image{slot}']), width=3.58*inch, height=2.33*inch
+                        ))
+                        caption_row.append(Paragraph(
+                            f"<i>{day_images.get(f'landmark{slot}_name', '')}</i>", styles['Normal']
+                        ))
                 
                 # Only add the table if we have at least one image
-                if len([x for x in image_row if x != '']) > 0:
+                if image_row:
+                    col_widths = [3.58*inch] * len(image_row)
                     # Images table
-                    images_table = Table([image_row], colWidths=[3.58*inch, 3.58*inch])
+                    images_table = Table([image_row], colWidths=col_widths)
                     images_table.setStyle(TableStyle([
                         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
                         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
@@ -491,7 +493,7 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
                     
                     # Captions table
                     story.append(Spacer(1, 4))
-                    captions_table = Table([caption_row], colWidths=[3.58*inch, 3.58*inch])
+                    captions_table = Table([caption_row], colWidths=col_widths)
                     captions_table.setStyle(TableStyle([
                         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
                         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
