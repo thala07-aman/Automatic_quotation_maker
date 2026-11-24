@@ -22,6 +22,8 @@ from image_fetcher import setup_unsplash_api
 from dashboard import render_dashboard
 from route_planner import build_route, render_route, render_flags
 from feasibility import check_plan
+from logistics import day_constraints
+from notes_parser import normalise_note_info, mode_into_city, quick_transport_mode
 
 # FIX: Configuration constants
 DEFAULT_EXTRA_BED_PRICE = 1500
@@ -288,15 +290,6 @@ def render_builder():
     with st.expander("🗺️ Route map & travel times", expanded=len(cities) > 1):
         render_route(route)
 
-    render_flags(check_plan(
-        cities,
-        days_per_city=days_per_city,
-        nights_per_city=nights_per_city,
-        legs=route["legs"],
-        arrival_date=arrival_date,
-        departure_date=departure_date,
-    ))
-
     # ------------------------------------------
     # OTHER INPUTS
     # ------------------------------------------
@@ -323,18 +316,40 @@ def render_builder():
     )
 
     # ------------------------------------------
-    # NOTES PER CITY (NEW FEATURE)
+    # NOTES PER CITY
     # ------------------------------------------
     st.subheader("📝 Notes / Recommendations Per City (Optional)")
+    st.caption(
+        "Write anything that should shape the plan: places the client wants to see, arrival / departure "
+        "time (e.g. \"arrives 10 pm\"), a transport mode other than car (e.g. \"comes by train\", "
+        "\"next city by flight\"), special occasions. Between cities the default is travel by car."
+    )
     city_notes = {}
 
     for city in cities:
         note = st.text_area(
             f"Notes for {city}",
             value=prefill.get("notes", {}).get(city, ""),
-            placeholder=f"Enter recommendations for {city}…"
+            placeholder=f"e.g. Jal Mahal must. Arrives by train at 10 pm. Next city by flight.",
+            key=f"notes_{city}",
         )
         city_notes[city] = note
+
+    # Early feasibility flags (cars between cities are assumed unless the notes say otherwise)
+    early_modes = {
+        c: (quick_transport_mode(city_notes[c]) or quick_transport_mode(city_notes[cities[i - 1]], to_next=True))
+        if i else ""
+        for i, c in enumerate(cities)
+    }
+    render_flags(check_plan(
+        cities,
+        days_per_city=days_per_city,
+        nights_per_city=nights_per_city,
+        legs=route["legs"],
+        arrival_date=arrival_date,
+        departure_date=departure_date,
+        transfer_modes=early_modes,
+    ))
 
     # ------------------------------------------
     # PROCESS BUTTON
@@ -353,6 +368,9 @@ def render_builder():
     multi_city_pricing = {}
     all_sightseeing = {}
     all_itineraries = {}
+    note_infos = {}       # per city: arrival / departure time and transport mode found in its notes
+    transfer_modes = {}   # per city: how the guests travel INTO it ('' = by car, the default)
+    inbound_legs = {leg["to"]: leg for leg in route["legs"]}
     room_config = {}  # FIX: Initialize outside loop
     car_details = {}  # FIX: Initialize outside loop
 
@@ -579,18 +597,37 @@ def render_builder():
                 sightseeing_list = sightseeing_data.get("sightseeing", [])
                 all_sightseeing[city] = sightseeing_list
 
+            # --- realistic day plan: arrival time, road distance, transport mode, departure ---
+            info = normalise_note_info(sightseeing_data.get("note_info"))
+            if not info["transport_mode"]:      # keyword fallback if the AI missed it
+                info["transport_mode"] = quick_transport_mode(city_notes[city])
+            if not info["transport_to_next"]:
+                info["transport_to_next"] = quick_transport_mode(city_notes[city], to_next=True)
+            note_infos[city] = info
+            transfer_modes[city] = mode_into_city(idx, cities, note_infos)
+            inbound = inbound_legs.get(city)
+            if inbound and inbound["from"] != (cities[idx - 1] if idx else None):
+                inbound = None
+            day_plans = day_constraints(
+                days, city, is_first_city=(idx == 0), is_last_city=(idx == len(cities) - 1),
+                inbound=inbound, notes={**info, "transport_mode": transfer_modes[city]},
+            )
+
             # --- itinerary (text cached; costs are re-applied so price edits don't regenerate it) ---
             with st.spinner(f"Itinerary → {city}"):
                 places_key = tuple(s.get("place") for s in sightseeing_list)
+                plan_key = hashlib.md5(json.dumps(day_plans, sort_keys=True, default=str).encode()).hexdigest()
                 itinerary_data = cached_ai(
-                    ("itinerary", city, days, places_key),
+                    ("itinerary", city, days, places_key, plan_key, city_notes[city]),
                     lambda: generate_itinerary(
                         city=city,
                         days=days,
                         sightseeing_list=sightseeing_list,
                         cost_per_day_total=cost_per_day_total,
                         cost_per_day_hotel=cost_per_day_hotel,
-                        cost_per_day_car=cost_per_day_car
+                        cost_per_day_car=cost_per_day_car,
+                        day_plans=day_plans,
+                        agent_notes=city_notes[city],
                     ),
                     is_ok=lambda r: bool(r.get("itinerary")),
                 )
@@ -668,6 +705,7 @@ def render_builder():
         car_details=car_details,
         arrival_date=arrival_date,
         departure_date=departure_date,
+        transfer_modes=transfer_modes,
     )
     if plan_flags:
         st.subheader("🧭 Plan Check")
@@ -688,6 +726,8 @@ def render_builder():
         "pricing": multi_city_pricing,
         "total_cost": total_cost,
         "notes_per_city": city_notes,
+        "note_info": note_infos,
+        "transfer_modes": transfer_modes,
         "room_config": room_config,  # FIX: Use collected data
         "car_details": car_details,   # FIX: Use collected data
         "arrival_date": arrival_date.strftime("%d %B %Y"),  # Format: 15 January 2026

@@ -19,6 +19,14 @@ DAY_OVERHEAD_HOURS = 2      # meals, check-in/out, local transfers
 SHORT_STAY_LEG_HOURS = 4    # a 1-day stay after a transfer at least this long is rushed
 CAR_NEEDED_KM = 150         # transfers at least this long normally need a car / transport
 
+_CAR_WORDS = ("car", "cab", "taxi", "drive", "road", "private", "innova", "suv", "tempo", "sedan")
+
+
+def is_car_mode(mode):
+    """True if a transfer mode means travelling by road in our own car (also when no mode was given)."""
+    mode = (mode or "").strip().lower()
+    return not mode or any(w in mode for w in _CAR_WORDS)
+
 
 def _flag(severity, message, city=None):
     return {"severity": severity, "message": message, "city": city}
@@ -32,7 +40,7 @@ def _fmt(hours):
 
 def check_plan(cities, days_per_city=None, legs=None, itinerary=None,
                car_details=None, arrival_date=None, departure_date=None,
-               nights_per_city=None):
+               nights_per_city=None, transfer_modes=None):
     """
     cities:         ordered list of city names
     days_per_city:  list of ints aligned with cities (itinerary days; last city includes the departure day)
@@ -41,10 +49,13 @@ def check_plan(cities, days_per_city=None, legs=None, itinerary=None,
     itinerary:      {city: [day dicts with optional "landmarks"]}
     car_details:    {city: {"required": bool, ...}}
     arrival_date / departure_date: datetime.date objects
+    transfer_modes: {city: mode of the transfer INTO that city}; legs that are not by car
+                    (train, flight, ...) are skipped, since road time / car rules don't apply
     """
     flags = []
     days_per_city = days_per_city or []
-    legs = legs or []
+    transfer_modes = transfer_modes or {}
+    legs = [leg for leg in (legs or []) if is_car_mode(transfer_modes.get(leg["to"]))]
     itinerary = itinerary or {}
     car_details = car_details or {}
 

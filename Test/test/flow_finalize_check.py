@@ -43,7 +43,8 @@ def sight(note, city, days, max_places):
     n = random.randint(0, 10**6) if NONDET else 1
     return {"sightseeing": [{"place": "P%d" % n, "description": "d"}]}
 
-def itin(city, days, sightseeing_list, cost_per_day_total=0, cost_per_day_hotel=0, cost_per_day_car=0):
+def itin(city, days, sightseeing_list, cost_per_day_total=0, cost_per_day_hotel=0, cost_per_day_car=0,
+         day_plans=None, agent_notes=""):
     return {"itinerary": [{"day": i + 1, "title": "T%d" % (random.randint(0, 10**6) if NONDET else i),
                            "activities": ["x"], "landmarks": ["a", "b"], "key_landmark": "a",
                            "day_cost_total": 1, "hotel_cost": 1, "car_cost": 0} for i in range(days)]}

@@ -10,7 +10,7 @@ import hashlib
 from PIL import Image, ImageStat
 import os
 import time
-from typing import Optional, Dict, List, Tuple
+from typing import Any, Optional, Dict, List, Tuple
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -466,25 +466,50 @@ def fetch_city_images(city: str, num_images: int = 2) -> Dict[str, bytes]:
     return images
 
 
-def new_image_tracker() -> Dict[str, set]:
-    """Tracks which places / photos were already used in one PDF, so substitutes aren't repeated."""
-    return {"names": set(), "hashes": set()}
+DUPLICATE_HASH_DISTANCE = 5     # differing bits (of 64) at or below which two photos count as the same picture
+
+
+def _dhash(data: bytes) -> Optional[int]:
+    """64-bit perceptual hash: equal for the same picture even if resized / re-compressed / re-cropped a little."""
+    try:
+        img = Image.open(io.BytesIO(data)).convert("L").resize((9, 8))
+    except Exception:
+        return None
+    px = list(img.getdata())
+    bits = 0
+    for row in range(8):
+        for col in range(8):
+            bits = (bits << 1) | (px[row * 9 + col] > px[row * 9 + col + 1])
+    return bits
+
+
+def _is_duplicate(digest: str, phash: Optional[int], seen_hashes: set, seen_phashes: list) -> bool:
+    if digest in seen_hashes:
+        return True
+    return phash is not None and any(bin(phash ^ p).count("1") <= DUPLICATE_HASH_DISTANCE for p in seen_phashes)
+
+
+def new_image_tracker() -> Dict[str, Any]:
+    """Tracks which places / photos were already used in one PDF, so nothing is shown twice."""
+    return {"names": set(), "hashes": set(), "phashes": []}
 
 
 def pick_day_images(city: str, preferred: List[str], alternates: Optional[List[str]] = None,
-                    used: Optional[Dict[str, set]] = None, count: int = 2,
-                    max_attempts: int = 8, must: Optional[List[str]] = None) -> List[Tuple[str, bytes]]:
+                    used: Optional[Dict[str, Any]] = None, count: int = 2,
+                    max_attempts: int = 10, must: Optional[List[str]] = None) -> List[Tuple[str, bytes]]:
     """
     Choose up to `count` photos for one itinerary day.
 
     0. `must` places (requested by the client in the notes) are searched with every source,
        including the looser ones, and are always tried first.
     1. The day's own landmarks (`preferred`) are tried first.
-    2. If one has no usable photo, other places from the city (`alternates`) are tried, skipping
-       places and photos already used elsewhere in the PDF.
+    2. If one has no usable photo, other places from the city (`alternates`) are tried.
     3. As a last resort the city's overview photo is used.
 
-    Returns [(place_name, jpeg_bytes), ...], possibly fewer than `count`. Never contains placeholders.
+    A place or a picture that was already used anywhere in the PDF (`used`) is never used again,
+    even under a different name or at a different size. Fewer than `count` photos is fine.
+
+    Returns [(place_name, jpeg_bytes), ...]. Never contains placeholders.
     """
     used = used if used is not None else new_image_tracker()
     must_keys = {m.strip().lower() for m in (must or [])}
@@ -497,16 +522,15 @@ def pick_day_images(city: str, preferred: List[str], alternates: Optional[List[s
     candidates.append((city, None, False))      # city overview photo
 
     chosen: List[Tuple[str, bytes]] = []
-    day_names, day_hashes = set(), set()
+    day_names = set()
     attempts = 0
 
     for name, landmark, is_preferred in candidates:
         if len(chosen) >= count or attempts >= max_attempts:
             break
         name_key = name.strip().lower()
-        if name_key in day_names:
-            continue
-        if not is_preferred and name_key in used["names"]:
+        used_key = f"{city.strip().lower()}|{name_key}"     # "City Palace" exists in many cities
+        if name_key in day_names or used_key in used["names"]:
             continue
 
         attempts += 1
@@ -516,14 +540,17 @@ def pick_day_images(city: str, preferred: List[str], alternates: Optional[List[s
             continue
 
         digest = hashlib.md5(raw).hexdigest()
-        if digest in day_hashes or (not is_preferred and digest in used["hashes"]):
+        phash = _dhash(raw)
+        if _is_duplicate(digest, phash, used["hashes"], used["phashes"]):
+            print(f"Photo for '{name}' ({city}) was already used in this PDF, trying another place")
             continue
 
         chosen.append((name, resize_image_for_pdf(raw)))
         day_names.add(name_key)
-        day_hashes.add(digest)
-        used["names"].add(name_key)
+        used["names"].add(used_key)
         used["hashes"].add(digest)
+        if phash is not None:
+            used["phashes"].append(phash)
 
     if preferred and chosen and [n for n, _ in chosen] != list(preferred)[:len(chosen)]:
         print(f"Image substitution in {city}: wanted {list(preferred)}, using {[n for n, _ in chosen]}")
@@ -531,7 +558,7 @@ def pick_day_images(city: str, preferred: List[str], alternates: Optional[List[s
 
 
 def fetch_day_images_from_landmarks(city: str, landmarks: list, alternates: Optional[list] = None,
-                                    used: Optional[Dict[str, set]] = None,
+                                    used: Optional[Dict[str, Any]] = None,
                                     must: Optional[list] = None) -> dict:
     """
     Fetch up to 2 images for a day. `must` places (from the client's notes) take the slots first.

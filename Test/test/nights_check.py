@@ -55,7 +55,8 @@ llm_client.chat = lambda *a, **k: "Nice hotel."
 SEEN = []
 def sight(note, city, days, max_places):
     return {"sightseeing": [{"place": "P", "description": "d"}]}
-def itin(city, days, sightseeing_list, cost_per_day_total=0, cost_per_day_hotel=0, cost_per_day_car=0):
+def itin(city, days, sightseeing_list, cost_per_day_total=0, cost_per_day_hotel=0, cost_per_day_car=0,
+         day_plans=None, agent_notes=""):
     SEEN.append((city, days))
     return {"itinerary": [{"day": i + 1, "title": "T%d" % i, "activities": ["x"], "landmarks": ["a", "b"],
                            "key_landmark": "a", "day_cost_total": 1, "hotel_cost": 1, "car_cost": 0} for i in range(days)]}
@@ -126,7 +127,7 @@ assert [p["nights"] for p in saved["pricing"].values()] == [2, 1, 1]
 sys.path.insert(0, APP_DIR)
 os.environ.setdefault("PEXELS_API_KEY", "")
 import image_fetcher
-image_fetcher.get_real_image = lambda city, landmark=None: None  # no network: PDF just omits photos
+image_fetcher.get_real_image = lambda city, landmark=None, must=False: None  # no network: PDF just omits photos
 from pdf_generator import generate_professional_pdf
 pdf = generate_professional_pdf(saved, "Nights Test", "QT-TEST", None)
 import re

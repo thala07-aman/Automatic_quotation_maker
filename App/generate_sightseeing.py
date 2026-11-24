@@ -3,6 +3,7 @@ import json
 from typing import Dict, Any
 
 from llm_client import chat
+from notes_parser import normalise_note_info
 
 
 def _same_place(a: str, b: str) -> bool:
@@ -18,6 +19,7 @@ def merge_note_places(data: Dict[str, Any], max_places: int) -> Dict[str, Any]:
     Put the places the client wrote in the notes first and flag them `must_visit`.
     The popular places fill the remaining slots, so the list is never shorter than the
     number of requested places (it grows beyond `max_places` if the notes need it).
+    Also turns the raw `note_info` phrases (arrival time, transport mode...) into clean fields.
     """
     note_places = []
     for item in data.get("note_places") or []:
@@ -32,6 +34,7 @@ def merge_note_places(data: Dict[str, Any], max_places: int) -> Dict[str, Any]:
     ]
     data["sightseeing"] = note_places + popular[:max(0, max_places - len(note_places))]
     data.pop("note_places", None)
+    data["note_info"] = normalise_note_info(data.get("note_info"))
     return data
 
 
@@ -39,6 +42,7 @@ def generate_sightseeing(note: str ,city: str, days: int = 3, max_places: int = 
     """
     Generates sightseeing suggestions for a travel quotation.
     Places named in the client's notes come first and are flagged "must_visit".
+    Also returns `note_info`: arrival / departure time and transport mode found in the notes.
     Returns structured JSON data.
     """
 
@@ -52,15 +56,22 @@ Short sentences only.
 Task:
 Generate a sightseeing list for a client visiting {city} for {days} days.
 
-Client notes for {city} (may be empty):
-\"\"\"{note.strip()}\"\"\"
+Notes written by the travel agent for {city} (may be empty, may be in Hindi/Hinglish).
+The notes can contain places AND logistics such as arrival time or mode of transport:
+\"\"\"{(note or "").strip()}\"\"\"
 
 1. "note_places": every attraction, landmark, temple, fort, market, viewpoint, park, beach or
-   other place to visit that is named in the client notes. Keep the name as the client wrote it
-   (fix obvious spelling only). Ignore hotels, restaurants, food, budgets and general wishes.
-   Use an empty list if the notes name no place.
+   other place to visit that is named in the notes. Keep the name as written
+   (fix obvious spelling only). Ignore hotels, restaurants, food, budgets, times, transport
+   and general wishes. Use an empty list if the notes name no place.
 2. "sightseeing": {max_places} well known places of {city}, NOT repeating any note_places.
    Order them by popularity: the city's single most famous, most photographed landmark first.
+3. "note_info": logistics found in the notes. Copy the client's own words; use "" when not mentioned.
+   - "arrival_time": when the guests reach {city} (e.g. "9 pm", "late night", "morning flight").
+   - "departure_time": when the guests leave {city} for home at the end of the trip (e.g. "6 am flight").
+   - "transport_mode": how the guests travel INTO {city} when it is NOT by car
+     (e.g. "train", "flight", "bus"). "" if by car or not mentioned.
+   - "transport_to_next": how they travel from {city} to the NEXT city when it is NOT by car. "" if by car or not mentioned.
 
 Return ONLY valid JSON in the following format:
 
@@ -77,7 +88,13 @@ Return ONLY valid JSON in the following format:
       "place": "Place name",
       "description": "Single-line description. No line breaks."
     }}
-  ]
+  ],
+  "note_info": {{
+    "arrival_time": "",
+    "departure_time": "",
+    "transport_mode": "",
+    "transport_to_next": ""
+  }}
 }}
 
 Rules:

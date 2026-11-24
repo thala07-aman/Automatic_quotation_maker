@@ -424,6 +424,11 @@ def generate_professional_pdf(quotation_data, customer_name, quotation_no, compa
             
             # Add 2 images of landmarks from the day's itinerary (9.1 cm width × 5.93 cm height each)
             try:
+                # Arrival-night / long-transfer / early-departure days have no sightseeing, so no photos
+                if day.get('no_sightseeing'):
+                    day_counter += 1
+                    continue
+
                 from image_fetcher import fetch_day_images_from_landmarks
                 
                 # Get landmarks from the itinerary for this day

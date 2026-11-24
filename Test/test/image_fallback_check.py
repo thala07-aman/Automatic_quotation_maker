@@ -17,9 +17,13 @@ import image_fetcher as f  # noqa: E402
 def jpeg(size=(800, 600), color=(120, 120, 120), noisy=True, seed=0):
     img = Image.new("RGB", size, color)
     if noisy:
+        import random
+        rnd = random.Random(seed)
         d = ImageDraw.Draw(img)
-        for i in range(0, size[0], 20):
-            d.rectangle([i, 0, i + 10 + seed % 7, size[1]], fill=((i * 3 + seed * 40) % 255, (i + seed * 70) % 255, 90))
+        for _ in range(60):     # distinct random blocks per seed, so different "photos" really differ
+            x, y = rnd.randrange(size[0]), rnd.randrange(size[1])
+            d.rectangle([x, y, x + rnd.randrange(30, 200), y + rnd.randrange(30, 200)],
+                        fill=(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)))
     buf = io.BytesIO()
     img.save(buf, "JPEG")
     return buf.getvalue()
@@ -46,7 +50,7 @@ photos = {  # place -> image bytes, or None when "no photo can be found"
 calls = []
 
 
-def fake_get_real_image(city, landmark=None):
+def fake_get_real_image(city, landmark=None, must=False):
     calls.append(landmark)
     return photos.get((landmark or city).strip().lower())
 
@@ -96,8 +100,32 @@ print("city-overview fallback and empty result OK")
 calls.clear()
 used = f.new_image_tracker()
 f.fetch_day_images_from_landmarks("Agra", ["Mehtab Bagh", "Sikandra"], [f"Nowhere {i}" for i in range(40)], used)
-assert len(calls) <= 8, len(calls)
+assert len(calls) <= 10, len(calls)
 print("lookups bounded OK ->", len(calls), "calls")
+
+# h) the same picture is never used twice in a PDF, across cities and under different names
+#    (Madurai / Rameshwaram bug: same photo or same-named place used again)
+shared = jpeg(seed=11)
+resized = f.resize_image_for_pdf(shared, 500, 400)          # same picture, different size / compression
+photos.clear()
+photos.update({
+    "meenakshi temple": shared, "pamban bridge": jpeg(seed=12), "ramanathaswamy temple": resized,
+    "dhanushkodi": jpeg(seed=13), "madurai": jpeg(seed=14), "rameshwaram": jpeg(seed=15),
+    "city palace": jpeg(seed=16),
+})
+used = f.new_image_tracker()
+r1 = f.fetch_day_images_from_landmarks("Madurai", ["Meenakshi Temple"], [], used)
+r2 = f.fetch_day_images_from_landmarks("Rameshwaram", ["Ramanathaswamy Temple", "Dhanushkodi"], [], used)
+assert r1["landmark1_name"] == "Meenakshi Temple"
+assert "Ramanathaswamy Temple" not in [r2.get("landmark1_name"), r2.get("landmark2_name")], r2
+assert r2["landmark1_name"] == "Dhanushkodi", r2
+# the same place name on a later day / another city is not shown again either
+r3 = f.fetch_day_images_from_landmarks("Madurai", ["Meenakshi Temple", "Madurai"], [], used)
+assert r3 == {}, r3         # both were already shown in this PDF: better no photo than a repeat
+# but another city's place with the same name is a different place
+r4 = f.fetch_day_images_from_landmarks("Jaipur", ["City Palace"], [], used)
+assert r4["landmark1_name"] == "City Palace", r4
+print("no photo repeated in a PDF (exact copy, resized copy, same place) OK")
 
 # g) placeholders are never returned by the picker; legacy function still can
 assert f.fetch_destination_image("Agra", "Zzqx") is not None
